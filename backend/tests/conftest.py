@@ -1,0 +1,69 @@
+"""Shared backend test fixtures."""
+
+from collections.abc import AsyncIterator, Iterator
+
+import httpx
+import pytest
+import pytest_asyncio
+from sqlalchemy import Engine, create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+import app.models as models
+from app.db.base import Base
+from app.db.schema import current_chunk_index_ddl, current_document_chunks_fts_ddl
+from app.db.session import get_db, get_session_factory
+from app.main import app
+
+loaded_model_types = (
+    models.User,
+    models.Conversation,
+    models.Document,
+    models.Message,
+)
+
+
+@pytest.fixture
+def session_factory() -> Iterator[sessionmaker[Session]]:
+    """Provide a session factory backed by an isolated in-memory database."""
+    engine: Engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(current_document_chunks_fts_ddl())
+        connection.exec_driver_sql(current_chunk_index_ddl())
+    factory: sessionmaker[Session] = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    yield factory
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def client(
+    session_factory: sessionmaker[Session],
+) -> AsyncIterator[httpx.AsyncClient]:
+    """Provide an ASGI client using the isolated test database."""
+
+    def override_get_db() -> Iterator[Session]:
+        """Yield a test database session for a request."""
+        with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    # Work that outlives the request, such as persisting a streamed answer, must
+    # land in the same isolated database instead of the module-level factory.
+    app.dependency_overrides[get_session_factory] = lambda: session_factory
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()

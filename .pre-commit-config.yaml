@@ -1,0 +1,60 @@
+# Pre-commit hooks for the Network RAG repository.
+#
+# Install once per clone:
+#     .venv\Scripts\pre-commit.exe install --hook-type pre-commit --hook-type pre-push
+#
+# The hook list mirrors `.github/workflows/ci.yml` exactly: ruff check plus
+# black --check. Do not substitute `ruff format` here — it and black disagree
+# on real constructs, so a hook that reformats differently from CI turns every
+# pull request into a formatting argument.
+default_stages: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (backend)
+        entry: .venv/Scripts/python.exe -m ruff check
+        language: system
+        files: ^(backend|scripts)/.*\.py$
+        pass_filenames: true
+        require_serial: true
+
+      - id: black
+        name: black --check (backend)
+        entry: .venv/Scripts/python.exe -m black --check
+        language: system
+        files: ^(backend|scripts)/.*\.py$
+        pass_filenames: true
+        require_serial: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+        args: ["--allow-multiple-documents"]
+      - id: detect-private-key
+      - id: end-of-file-fixer
+        exclude: ^(requirements\.lock|frontend/package-lock\.json)$
+      - id: fix-byte-order-marker
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: trailing-whitespace
+        exclude: ^(requirements\.lock|frontend/package-lock\.json)$
+
+  - repo: local
+    hooks:
+      - id: backend-tests
+        name: pytest (pre-push gate)
+        entry: .venv/Scripts/python.exe -m pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+        stages: [pre-push]

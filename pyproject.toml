@@ -1,0 +1,27 @@
+[project]
+name = "network-rag"
+version = "0.1.0"
+description = "Network engineering RAG project scaffold"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["backend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "ANN", "D"]
+ignore = ["D100", "D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+addopts = "-q --cov=app --cov-report=term-missing --cov-fail-under=80"
+pythonpath = ["backend", "."]
+testpaths = ["backend/tests"]

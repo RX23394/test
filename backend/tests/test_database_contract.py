@@ -1,0 +1,214 @@
+"""Database contract tests for migrations, schema drift, and foreign keys.
+
+These tests exist because two defects survived the original suite:
+
+* ``backend/network_rag.db`` sat one revision behind the models, so every
+  document query raised ``no such column: documents.indexing_job_id``. The rest
+  of the suite builds its schema with ``Base.metadata.create_all``, which can
+  never detect migration drift.
+* ``PRAGMA foreign_keys`` was never enabled, so every ``ondelete="CASCADE"`
+  declared by the models did nothing on SQLite.
+
+Both tests therefore run the real migrations instead of ``create_all``.
+"""
+
+import os
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
+from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from alembic import command
+from app.core.config import get_settings
+from app.db.base import Base
+from app.db.schema import (
+    CHUNK_INDEX_COLUMNS,
+    CHUNK_INDEX_TABLE,
+    DOCUMENT_CHUNKS_FTS_COLUMNS,
+    DOCUMENT_CHUNKS_FTS_TABLE,
+)
+from app.models.conversation import Conversation
+from app.models.document import Document, DocumentStatus
+from app.models.message import Message, MessageRole
+from app.models.user import User
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
+
+
+def upgrade_to_head(database_path: Path) -> Config:
+    """Run every migration against ``database_path`` and return its config.
+
+    ``alembic/env.py`` resolves its URL from ``get_settings()``, not from the
+    Alembic config object, so the only reliable way to redirect a migration is
+    the ``DATABASE_URL`` environment variable plus clearing the settings cache.
+    """
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(str(ALEMBIC_INI))
+    config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    config.set_main_option("sqlalchemy.url", database_url)
+
+    previous_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = database_url
+    get_settings.cache_clear()
+    try:
+        command.upgrade(config, "head")
+    finally:
+        if previous_url is None:
+            del os.environ["DATABASE_URL"]
+        else:
+            os.environ["DATABASE_URL"] = previous_url
+        get_settings.cache_clear()
+    return config
+
+
+@pytest.fixture
+def migrated_engine(tmp_path: Path) -> Iterator[Engine]:
+    """Provide an engine whose schema was produced by running all migrations."""
+    database_path = tmp_path / "migrated.db"
+    upgrade_to_head(database_path)
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    yield engine
+    engine.dispose()
+
+
+def test_migrations_reach_head_on_an_empty_database(tmp_path: Path) -> None:
+    """Every migration must apply cleanly to an empty database."""
+    database_path = tmp_path / "fresh.db"
+    config = upgrade_to_head(database_path)
+
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with engine.connect() as connection:
+            current = MigrationContext.configure(connection).get_current_revision()
+        expected = ScriptDirectory.from_config(config).get_current_head()
+        assert current == expected
+    finally:
+        engine.dispose()
+
+
+def test_migrated_schema_matches_orm_metadata(migrated_engine: Engine) -> None:
+    """The migrated schema must contain every column the ORM models declare.
+
+    This is the assertion that would have caught the missing
+    ``documents.indexing_job_id`` column: it compares the database produced by
+    the migrations against ``Base.metadata`` instead of trusting ``create_all``.
+    """
+    inspector = inspect(migrated_engine)
+    existing_tables = set(inspector.get_table_names())
+    missing_tables: list[str] = []
+    missing_columns: list[str] = []
+
+    for table_name, table in Base.metadata.tables.items():
+        if table_name not in existing_tables:
+            missing_tables.append(table_name)
+            continue
+        database_columns = {
+            column["name"] for column in inspector.get_columns(table_name)
+        }
+        for column in table.columns:
+            if column.name not in database_columns:
+                missing_columns.append(f"{table_name}.{column.name}")
+
+    assert missing_tables == []
+    assert missing_columns == []
+
+
+def test_migrations_define_the_fts_tables_the_application_queries(
+    migrated_engine: Engine,
+) -> None:
+    """The migrated database must expose the FTS columns the code reads."""
+    with migrated_engine.connect() as connection:
+        chunks_columns = {
+            row["name"]
+            for row in connection.exec_driver_sql(
+                f"PRAGMA table_info({DOCUMENT_CHUNKS_FTS_TABLE})"
+            ).mappings()
+        }
+        index_columns = {
+            row["name"]
+            for row in connection.exec_driver_sql(
+                f"PRAGMA table_info({CHUNK_INDEX_TABLE})"
+            ).mappings()
+        }
+
+    assert chunks_columns == {name for name, _ in DOCUMENT_CHUNKS_FTS_COLUMNS}
+    assert index_columns == {name for name, _ in CHUNK_INDEX_COLUMNS}
+
+
+def test_migrated_database_enables_foreign_key_enforcement(
+    migrated_engine: Engine,
+) -> None:
+    """A connection created by the application must enforce foreign keys."""
+    factory: sessionmaker[Session] = sessionmaker(bind=migrated_engine)
+    with factory() as session:
+        enabled = session.execute(text("PRAGMA foreign_keys")).scalar()
+    assert enabled == 1
+
+
+def test_deleting_a_user_cascades_to_owned_rows(
+    migrated_engine: Engine,
+) -> None:
+    """Deleting a user must remove their documents, conversations, and messages."""
+    factory: sessionmaker[Session] = sessionmaker(bind=migrated_engine)
+    with factory() as session:
+        user = User(
+            username="cascade-user",
+            password_hash="hash",
+            is_admin=False,
+            is_active=True,
+        )
+        session.add(user)
+        session.flush()
+
+        document = Document(
+            filename="f.txt",
+            original_filename="f.txt",
+            sha256="digest",
+            file_size=10,
+            uploader_id=user.id,
+            status=DocumentStatus.PENDING,
+        )
+        conversation = Conversation(user_id=user.id, title="chat")
+        session.add_all([document, conversation])
+        session.flush()
+        session.add(
+            Message(
+                conversation_id=conversation.id,
+                role=MessageRole.USER,
+                content="hello",
+            )
+        )
+        session.commit()
+        user_id = user.id
+
+    # Delete through raw SQL so that only the database-level cascade can remove
+    # the dependent rows; the ORM never sees the children.
+    with factory() as session:
+        session.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+        session.commit()
+
+        for table in ("documents", "conversations", "messages"):
+            remaining = session.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+            assert remaining == 0, f"{table} kept orphaned rows after user deletion"
+
+
+def test_foreign_keys_stay_enabled_for_in_memory_engines() -> None:
+    """Engines built by tests must share the enforcement guarantee."""
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as connection:
+            enabled = connection.exec_driver_sql("PRAGMA foreign_keys").scalar()
+    finally:
+        engine.dispose()
+    assert enabled == 1

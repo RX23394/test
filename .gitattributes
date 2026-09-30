@@ -1,0 +1,32 @@
+# Normalize every text file to LF in the repository and in the working tree.
+# This project was authored on Windows with mixed CRLF/LF files, so without a
+# single repository-wide rule the first commit after normalization would show
+# every CRLF file as fully rewritten.
+* text=auto eol=lf
+
+# Windows-only command files must keep CRLF to stay executable by cmd.exe.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets: never normalize, never diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.db binary
+*.sqlite3 binary
+*.lock binary
+
+# Keep generated lockfiles out of diffs and merge conflicts.
+frontend/package-lock.json -diff linguist-generated=true
+requirements.lock -diff linguist-generated=true

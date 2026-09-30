@@ -1,0 +1,15 @@
+# Conventional Commits template.
+# Git strips lines starting with '#'; keep the body wrapped at 72 columns.
+
+# <type>(<scope>): <imperative summary, <= 72 chars>
+#
+# Types: feat | fix | refactor | perf | test | docs | build | ci | chore | revert
+# Scopes: backend | frontend | rag | auth | db | fts | chat | search | docs | ci | deps
+#
+# Why (the problem this commit solves):
+#
+# How (the approach, and anything a reviewer would otherwise have to guess):
+#
+# Verification (exact commands run and their result):
+#
+# Refs: #<issue>

@@ -1,0 +1,155 @@
+:root {
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color: #1f2937;
+  background: #ffffff;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  color-scheme: light;
+  --app-bg: #f4f6fa;
+  --app-surface: #ffffff;
+  --app-surface-soft: #f8fafc;
+  --app-border: #e2e8f0;
+  --app-text: #1f2937;
+  --app-muted: #64748b;
+}
+
+html.dark {
+  color-scheme: dark;
+  --app-bg: #0b1120;
+  --app-surface: #111827;
+  --app-surface-soft: #172033;
+  --app-border: #273449;
+  --app-text: #e5edf8;
+  --app-muted: #94a3b8;
+  --el-bg-color: #111827;
+  --el-bg-color-overlay: #172033;
+  --el-fill-color-blank: #111827;
+  --el-fill-color-light: #1e293b;
+  --el-fill-color-lighter: #172033;
+  --el-border-color: #334155;
+  --el-border-color-light: #2b384c;
+  --el-border-color-lighter: #243044;
+  --el-text-color-primary: #e5edf8;
+  --el-text-color-regular: #cbd5e1;
+  --el-text-color-secondary: #94a3b8;
+  --el-mask-color: rgb(2 6 23 / 72%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  color: var(--app-text);
+  background: var(--app-bg);
+  transition: color 0.2s ease, background-color 0.2s ease;
+}
+
+html.dark .app-shell,
+html.dark .section-card {
+  background: var(--app-bg) !important;
+}
+
+html.dark .app-header,
+html.dark .chat-page,
+html.dark .conversation-sidebar,
+html.dark .document-card,
+html.dark .users-card,
+html.dark .summary > div,
+html.dark .upload-zone,
+html.dark .toolbar,
+html.dark .preview-panel,
+html.dark .detail-grid > div {
+  border-color: var(--app-border) !important;
+  background: var(--app-surface) !important;
+}
+
+html.dark th,
+html.dark .message-bubble,
+html.dark .empty-chat,
+html.dark .preview-panel,
+html.dark .conversation-item:hover,
+html.dark .conversation-item.is-active {
+  background: var(--app-surface-soft) !important;
+}
+
+html.dark td,
+html.dark .composer,
+html.dark .chat-heading {
+  border-color: var(--app-border) !important;
+  background: var(--app-surface) !important;
+}
+
+html.dark h1,
+html.dark h2,
+html.dark h3,
+html.dark .toolbar h3,
+html.dark .file-cell strong,
+html.dark .user-cell strong,
+html.dark .conversation-select,
+html.dark .page-heading h2,
+html.dark .summary strong {
+  color: var(--app-text) !important;
+}
+
+html.dark p,
+html.dark td,
+html.dark .toolbar span {
+  color: var(--app-muted);
+}
+
+.state-skeleton {
+  padding: 24px;
+}
+
+.state-error {
+  margin: 16px 24px 0;
+}
+
+@media (max-width: 560px) {
+  .state-skeleton {
+    padding: 16px;
+  }
+
+  .state-error {
+    margin: 12px 14px 0;
+  }
+
+  .page-heading h2 {
+    font-size: 1.4rem !important;
+  }
+
+  .summary {
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .summary > div {
+    min-width: 96px !important;
+  }
+
+  .document-card,
+  .users-card,
+  .chat-page,
+  .conversation-sidebar {
+    border-radius: 12px !important;
+  }
+}
+
+.home {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+}
+
+.home h1 {
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 600;
+  letter-spacing: 0;
+}
