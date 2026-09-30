@@ -25,4 +25,3 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Revert this migration."""
     ${downgrades if downgrades else "pass"}
-

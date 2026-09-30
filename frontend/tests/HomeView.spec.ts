@@ -11,4 +11,3 @@ describe("HomeView", () => {
     expect(wrapper.text()).toContain("\u804a\u5929\u5de5\u4f5c\u533a\u5df2\u5c31\u7eea");
   });
 });
-
