@@ -6,10 +6,17 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage-*
 coverage.xml
 htmlcov/
 .venv/
 venv/
+pytest-of-*/
+data-gym-cache/
+
+# jieba writes its dictionary cache next to the working directory on first use.
+jieba.cache
+jiebacache
 
 # Environment and local databases
 .env
@@ -35,3 +42,6 @@ Thumbs.db
 # Local scratch files
 *.tmp
 .commit-msg*.tmp
+
+# pre-commit cache when redirected into the workspace
+.pre-commit-cache/
