@@ -31,3 +31,7 @@ frontend/test-results/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local scratch files
+*.tmp
+.commit-msg*.tmp
