@@ -33,9 +33,15 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 def create_access_token(
     subject: int,
+    token_version: int = 1,
     expires_delta: timedelta | None = None,
 ) -> str:
-    """Create a signed JWT access token for a user identifier."""
+    """Create a signed JWT access token for a user identifier.
+
+    ``token_version`` is the generation the token belongs to. Tokens minted
+    before this claim existed default to generation 1, which is what the column
+    default gives existing users.
+    """
     settings = get_settings()
     issued_at = datetime.now(UTC)
     expires_at = issued_at + (
@@ -48,6 +54,7 @@ def create_access_token(
         "iat": issued_at,
         "exp": expires_at,
         "type": "access",
+        "ver": token_version,
     }
     return jwt.encode(
         payload,

@@ -64,6 +64,16 @@ class UserRepository:
         user.is_admin = is_admin
         return self._commit_update(user)
 
+    def bump_token_version(self, user: User) -> User:
+        """Revoke every outstanding access token of a user.
+
+        Called on logout and required by any future password change: the JWT
+        itself cannot be withdrawn, so the generation it was minted with is what
+        makes it stop working.
+        """
+        user.token_version += 1
+        return self._commit_update(user)
+
     def _commit_update(self, user: User) -> User:
         """Commit and refresh a modified user instance."""
         try:

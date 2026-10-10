@@ -6,7 +6,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.auth.cookies import clear_auth_cookie, set_auth_cookie
-from app.auth.dependencies import CurrentUser, SessionDependency
+from app.auth.dependencies import (
+    CurrentUser,
+    OptionalCurrentUser,
+    SessionDependency,
+)
 from app.auth.security import create_access_token
 from app.core.rate_limit import (
     FixedWindowRateLimiter,
@@ -64,7 +68,7 @@ async def login(
         )
 
     login_limiter.reset(key)
-    set_auth_cookie(response, create_access_token(user.id))
+    set_auth_cookie(response, create_access_token(user.id, user.token_version))
     return ResponseModel(status="ok", data=UserResponse.model_validate(user))
 
 
@@ -73,8 +77,14 @@ async def login(
     response_model=ResponseModel[None],
     response_model_exclude_none=True,
 )
-async def logout(response: Response) -> ResponseModel[None]:
-    """Clear the authentication cookie."""
+async def logout(
+    response: Response,
+    current_user: OptionalCurrentUser,
+    session: SessionDependency,
+) -> ResponseModel[None]:
+    """Clear the authentication cookie and revoke the caller's tokens."""
+    if current_user is not None:
+        UserRepository(session).bump_token_version(current_user)
     clear_auth_cookie(response)
     return ResponseModel(status="ok")
 

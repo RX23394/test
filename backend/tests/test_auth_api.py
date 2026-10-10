@@ -5,7 +5,8 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.routes.auth import LOGIN_RATE_LIMIT_MESSAGE
-from app.auth.security import hash_password
+from app.auth.security import create_access_token, hash_password
+from app.core.config import get_settings
 from app.core.rate_limit import FixedWindowRateLimiter, get_login_rate_limiter
 from app.main import app
 from app.models.user import User
@@ -157,6 +158,62 @@ async def test_me_requires_authentication(client: httpx.AsyncClient) -> None:
         "status": "error",
         "message": "Authentication required",
     }
+
+
+@pytest.mark.asyncio
+async def test_logout_revokes_the_presented_token(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A token copied before logout stops working afterwards."""
+    create_user(session_factory)
+    login_response = await client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "secure-password"},
+    )
+    stolen_cookie = login_response.cookies[get_settings().auth_cookie_name]
+
+    logout_response = await client.post("/api/auth/logout")
+    client.cookies.set(get_settings().auth_cookie_name, stolen_cookie)
+    replay_response = await client.get("/api/auth/me")
+
+    assert logout_response.status_code == 200
+    assert replay_response.status_code == 401
+    assert replay_response.json() == {
+        "status": "error",
+        "message": "Authentication required",
+    }
+
+
+@pytest.mark.asyncio
+async def test_token_from_an_older_generation_is_rejected(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Bumping the stored generation invalidates already issued tokens."""
+    user = create_user(session_factory)
+    stale_token = create_access_token(user.id, user.token_version)
+    with session_factory() as session:
+        stored = UserRepository(session).get_by_id(user.id)
+        assert stored is not None
+        UserRepository(session).bump_token_version(stored)
+
+    client.cookies.set(get_settings().auth_cookie_name, stale_token)
+    response = await client.get("/api/auth/me")
+
+    assert response.status_code == 401
+    assert response.json()["message"] == "Authentication required"
+
+
+@pytest.mark.asyncio
+async def test_logout_without_a_valid_cookie_still_clears_it(
+    client: httpx.AsyncClient,
+) -> None:
+    """Logging out twice is not an error and never leaks a 401 to the client."""
+    response = await client.post("/api/auth/logout")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
 @pytest.mark.asyncio

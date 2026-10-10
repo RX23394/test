@@ -75,3 +75,6 @@ class TokenPayload(BaseModel):
     exp: datetime
     iat: datetime
     type: Literal["access"]
+    # Tokens issued before revocation support carry no version; they belong to
+    # the first generation, which is what existing users start at.
+    ver: int = 1

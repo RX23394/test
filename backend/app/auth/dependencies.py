@@ -14,8 +14,8 @@ from app.repositories.user import UserRepository
 SessionDependency = Annotated[Session, Depends(get_db)]
 
 
-def get_current_user(request: Request, session: SessionDependency) -> User:
-    """Return the active user represented by the authentication cookie."""
+def _load_user_from_token(request: Request, session: Session) -> User:
+    """Return the user named by the request cookie or raise a 401."""
     token = request.cookies.get(get_settings().auth_cookie_name)
     if token is None:
         raise HTTPException(
@@ -38,10 +38,33 @@ def get_current_user(request: Request, session: SessionDependency) -> User:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
         )
+    if payload.ver != user.token_version:
+        # The token was revoked (logout or a password change bumped the version).
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
     return user
 
 
+def get_current_user(request: Request, session: SessionDependency) -> User:
+    """Return the active user represented by the authentication cookie."""
+    return _load_user_from_token(request, session)
+
+
+def get_optional_current_user(
+    request: Request,
+    session: SessionDependency,
+) -> User | None:
+    """Return the cookie's user, or None when it is absent or no longer valid."""
+    try:
+        return _load_user_from_token(request, session)
+    except HTTPException:
+        return None
+
+
 CurrentUser = Annotated[User, Depends(get_current_user)]
+OptionalCurrentUser = Annotated[User | None, Depends(get_optional_current_user)]
 
 
 def get_current_admin(current_user: CurrentUser) -> User:
