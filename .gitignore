@@ -42,6 +42,8 @@ Thumbs.db
 # Local scratch files
 *.tmp
 .commit-msg*.tmp
+# Sandboxed tool caches (ruff/black/coverage) redirected into the workspace
+.tmp-session/
 
 # pre-commit cache when redirected into the workspace
 .pre-commit-cache/
