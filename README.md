@@ -204,6 +204,12 @@ python -m app.cli.rebuild_search_index
 也只重新分词、不重新解析，所以要让旧文档用上新尺寸，需要在管理界面对它们重新执行
 索引（解析 → 切块 → Embedding → 写入两个存储）。
 
+**大文件建议用后台索引接口。** `POST /api/admin/documents/{id}/index/async` 先
+claim 任务并立即返回 `202` 与 `job_id`，解析、切块、Embedding、写两个存储都在响应
+之后执行（任务自持数据库会话，与流式回答的持久化同理）；进度通过文档状态体现
+（`processing` → `indexed`/`failed`），失败同样会自动补偿并落到 `failed`。原来的
+同步接口 `POST /api/admin/documents/{id}/index` 保留，前端仍使用它。
+
 **卡住的索引任务会自动回收。** 索引任务带租约（`INDEXING_LEASE_SECONDS`，默认 15
 分钟）：worker 崩溃后文档不会永久停在“处理中”，重新点击索引会先释放过期租约再
 claim；也可以用命令做全库清扫：

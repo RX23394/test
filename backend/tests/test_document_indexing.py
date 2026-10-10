@@ -25,6 +25,7 @@ from app.repositories.document import DocumentRepository
 from app.repositories.qdrant import QdrantChunkRepository
 from app.repositories.user import UserRepository
 from app.schemas.chunk import Chunk
+from app.services import indexing_jobs
 from app.services.conversation import ConversationService
 from app.services.document_parser import (
     DocumentContent,
@@ -122,6 +123,11 @@ class FixedLLMProvider:
         self.messages = list(messages)
         yield "OSPF is a routing protocol "
         yield "[S1]."
+
+
+def use_fixed_embedding_service() -> EmbeddingService:
+    """Return an embedding service that never loads model weights."""
+    return EmbeddingService(FixedEncoder())
 
 
 def create_indexable_document(
@@ -279,6 +285,126 @@ async def test_index_endpoint_writes_chunks_to_qdrant(
             "user",
             "assistant",
         ]
+
+
+@pytest.mark.asyncio
+async def test_async_index_endpoint_returns_a_job_and_indexes_in_the_background(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The async endpoint answers 202 immediately and the job finishes after it."""
+    settings: Settings = get_settings()
+    monkeypatch.setattr(settings, "document_upload_dir", tmp_path)
+    # The background job builds its own chunk service from its own module.
+    monkeypatch.setattr(indexing_jobs, "ChunkService", FixedChunkService)
+    qdrant_client = QdrantClient(location=":memory:")
+    qdrant_repository = QdrantChunkRepository(
+        url="http://unused",
+        collection_name="async_chunks",
+        client=qdrant_client,
+    )
+
+    def override_embedding_service() -> EmbeddingService:
+        """Return a deterministic embedding service for the endpoint."""
+        return EmbeddingService(FixedEncoder())
+
+    def override_qdrant_repository() -> QdrantChunkRepository:
+        """Return the in-memory Qdrant repository for the endpoint."""
+        return qdrant_repository
+
+    def override_parser_registry() -> ParserRegistry:
+        """Return a registry with the indexing test parser."""
+        registry = ParserRegistry()
+        registry.register(".md", FakeMarkdownParser())
+        return registry
+
+    app.dependency_overrides[get_embedding_service] = override_embedding_service
+    app.dependency_overrides[get_qdrant_repository] = override_qdrant_repository
+    app.dependency_overrides[get_parser_registry] = override_parser_registry
+
+    with session_factory() as session:
+        document = create_indexable_document(session, tmp_path)
+        document_id = document.id
+        uploader_id = document.uploader_id
+    client.cookies.set(
+        settings.auth_cookie_name,
+        create_access_token(uploader_id),
+    )
+
+    response = await client.post(f"/api/admin/documents/{document_id}/index/async")
+
+    assert response.status_code == 202
+    payload = response.json()["data"]
+    assert payload["document_id"] == document_id
+    assert payload["status"] == "processing"
+    assert payload["job_id"]
+
+    points, _ = qdrant_client.scroll(
+        collection_name="async_chunks",
+        limit=10,
+        with_payload=True,
+    )
+    assert len(points) == 2
+    with session_factory() as session:
+        stored = DocumentRepository(session).get_by_id(document_id)
+        assert stored is not None
+        assert stored.status is DocumentStatus.INDEXED
+        assert stored.indexing_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_async_index_endpoint_rejects_a_claimed_document(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second request cannot steal a live indexing job."""
+    settings: Settings = get_settings()
+    monkeypatch.setattr(settings, "document_upload_dir", tmp_path)
+    app.dependency_overrides[get_embedding_service] = use_fixed_embedding_service
+    with session_factory() as session:
+        document = create_indexable_document(session, tmp_path)
+        document_id = document.id
+        uploader_id = document.uploader_id
+        repository = DocumentRepository(session)
+        assert repository.claim_for_indexing(document_id, "live-job") is not None
+    client.cookies.set(
+        settings.auth_cookie_name,
+        create_access_token(uploader_id),
+    )
+
+    response = await client.post(f"/api/admin/documents/{document_id}/index/async")
+
+    assert response.status_code == 409
+    assert response.json()["message"] == "Document indexing is already in progress"
+
+
+@pytest.mark.asyncio
+async def test_async_index_endpoint_reports_missing_documents(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown document id is a 404, not a queued job."""
+    settings: Settings = get_settings()
+    monkeypatch.setattr(settings, "document_upload_dir", tmp_path)
+    app.dependency_overrides[get_embedding_service] = use_fixed_embedding_service
+    with session_factory() as session:
+        document = create_indexable_document(session, tmp_path)
+        uploader_id = document.uploader_id
+    client.cookies.set(
+        settings.auth_cookie_name,
+        create_access_token(uploader_id),
+    )
+
+    response = await client.post("/api/admin/documents/9999/index/async")
+
+    assert response.status_code == 404
+    assert response.json()["message"] == "Document not found"
 
 
 @pytest.mark.asyncio

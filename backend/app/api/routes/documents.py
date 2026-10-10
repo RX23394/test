@@ -4,7 +4,16 @@ import logging
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.pagination import (
@@ -15,12 +24,13 @@ from app.api.pagination import (
 )
 from app.auth.dependencies import CurrentAdmin, SessionDependency
 from app.core.config import get_settings
+from app.db.session import SessionFactoryDependency
 from app.models.document import DocumentStatus
 from app.rag.dependencies import EmbeddingDependency, QdrantDependency
 from app.repositories.document import DocumentRepository
 from app.repositories.fts import FtsChunkRepository
 from app.schemas.document import DocumentResponse
-from app.schemas.indexing import DocumentIndexResult
+from app.schemas.indexing import DocumentIndexJobResponse, DocumentIndexResult
 from app.schemas.response import ResponseModel
 from app.services.chunk import ChunkService
 from app.services.document import (
@@ -43,6 +53,7 @@ from app.services.indexing import (
     DocumentIndexOwnershipError,
     DocumentTextEmptyError,
 )
+from app.services.indexing_jobs import claim_indexing_job, run_indexing_job
 
 router = APIRouter(prefix="/api/admin/documents", tags=["admin-documents"])
 logger = logging.getLogger(__name__)
@@ -218,6 +229,59 @@ def parse_document(
         ) from exc
 
     return ResponseModel(status="ok", data=content)
+
+
+@router.post(
+    "/{document_id}/index/async",
+    response_model=ResponseModel[DocumentIndexJobResponse],
+    response_model_exclude_none=True,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def start_document_indexing(
+    document_id: int,
+    background_tasks: BackgroundTasks,
+    current_admin: CurrentAdmin,
+    session: SessionDependency,
+    session_factory: SessionFactoryDependency,
+    embedding_service: EmbeddingDependency,
+    qdrant_repository: QdrantDependency,
+    parser_registry: ParserRegistryDependency,
+) -> ResponseModel[DocumentIndexJobResponse]:
+    """Claim a document for indexing and run the pipeline in the background."""
+    del current_admin
+    repository = DocumentRepository(session)
+    document = repository.get_by_id(document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+    if document.status is DocumentStatus.INDEXED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is already indexed",
+        )
+
+    job_id = claim_indexing_job(repository, document_id)
+    if job_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document indexing is already in progress",
+        )
+
+    background_tasks.add_task(
+        run_indexing_job,
+        session_factory,
+        document_id,
+        job_id,
+        embedding_service=embedding_service,
+        vector_repository=qdrant_repository,
+        parser_registry=parser_registry,
+    )
+    return ResponseModel(
+        status="ok",
+        data=DocumentIndexJobResponse(document_id=document_id, job_id=job_id),
+    )
 
 
 @router.post(
