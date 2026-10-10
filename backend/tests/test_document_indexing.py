@@ -98,6 +98,15 @@ class FixedChunkService:
         ]
 
 
+class EmptyChunkService:
+    """Return no chunk, like a scanned PDF without a text layer."""
+
+    def create_chunks(self, document: DocumentContent) -> list[Chunk]:
+        """Return an empty chunk list."""
+        del document
+        return []
+
+
 class FixedLLMProvider:
     """Stream a deterministic answer and record citation sources."""
 
@@ -270,3 +279,62 @@ async def test_index_endpoint_writes_chunks_to_qdrant(
             "user",
             "assistant",
         ]
+
+
+@pytest.mark.asyncio
+async def test_index_endpoint_reports_documents_without_extractable_text(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document with no searchable text fails loudly instead of indexing empty."""
+    settings: Settings = get_settings()
+    monkeypatch.setattr(settings, "document_upload_dir", tmp_path)
+    monkeypatch.setattr(document_routes, "ChunkService", EmptyChunkService)
+    qdrant_client = QdrantClient(location=":memory:")
+    qdrant_repository = QdrantChunkRepository(
+        url="http://unused",
+        collection_name="empty_chunks",
+        client=qdrant_client,
+    )
+
+    def override_embedding_service() -> EmbeddingService:
+        """Return a deterministic embedding service for the endpoint."""
+        return EmbeddingService(FixedEncoder())
+
+    def override_qdrant_repository() -> QdrantChunkRepository:
+        """Return the in-memory Qdrant repository for the endpoint."""
+        return qdrant_repository
+
+    def override_parser_registry() -> ParserRegistry:
+        """Return a registry with the indexing test parser."""
+        registry = ParserRegistry()
+        registry.register(".md", FakeMarkdownParser())
+        return registry
+
+    app.dependency_overrides[get_embedding_service] = override_embedding_service
+    app.dependency_overrides[get_qdrant_repository] = override_qdrant_repository
+    app.dependency_overrides[get_parser_registry] = override_parser_registry
+
+    with session_factory() as session:
+        document = create_indexable_document(session, tmp_path)
+        document_id = document.id
+        uploader_id = document.uploader_id
+    client.cookies.set(
+        settings.auth_cookie_name,
+        create_access_token(uploader_id),
+    )
+
+    response = await client.post(f"/api/admin/documents/{document_id}/index")
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "status": "error",
+        "message": "Document contains no extractable text; scanned files need OCR",
+    }
+    with session_factory() as session:
+        stored = DocumentRepository(session).get_by_id(document_id)
+        assert stored is not None
+        assert stored.status is DocumentStatus.FAILED
+    assert not qdrant_client.collection_exists("empty_chunks")

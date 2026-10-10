@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     openai_api_key: str = "not-required"
     openai_model: str = "gpt-4o-mini"
     openai_timeout_seconds: float = 60.0
+    # A grounded answer has to be reproducible, so sampling is disabled and the
+    # completion is capped instead of letting the model expand indefinitely.
+    openai_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    openai_max_tokens: int = Field(default=1024, ge=1)
     frontend_origin: str = "http://127.0.0.1:5173"
     jwt_secret_key: str = DEFAULT_JWT_SECRET_KEY
     jwt_algorithm: str = "HS256"

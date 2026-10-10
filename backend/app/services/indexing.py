@@ -89,6 +89,14 @@ class DocumentIndexError(RuntimeError):
     """Raised when embedding generation or vector persistence fails."""
 
 
+class DocumentTextEmptyError(DocumentIndexError):
+    """Raised when a document yields no searchable chunk at all.
+
+    A scanned PDF has no extractable text layer, so indexing it would otherwise
+    report success with zero chunks while nothing can ever be retrieved.
+    """
+
+
 class DocumentIndexConsistencyError(DocumentIndexError):
     """Raised when an indexing failure cannot be fully compensated."""
 
@@ -125,6 +133,10 @@ class DocumentIndexingService:
             content = self._parsing_service.parse(document)
             self._require_ownership(document.id, job_id)
             chunks = self._chunk_service.create_chunks(content)
+            if not any(chunk.content.strip() for chunk in chunks):
+                raise DocumentTextEmptyError(
+                    "Document produced no searchable text; scanned files need OCR"
+                )
             self._require_ownership(document.id, job_id)
             vectors = self._embedding_service.embed_passages(
                 [chunk.content for chunk in chunks]

@@ -11,6 +11,7 @@ from app.services.indexing import (
     DocumentIndexConsistencyError,
     DocumentIndexingService,
     DocumentIndexOwnershipError,
+    DocumentTextEmptyError,
 )
 
 
@@ -253,5 +254,61 @@ def test_non_owner_cannot_complete_or_compensate() -> None:
         create_service(documents, vectors, texts).index(document, "owner-b")
 
     assert documents.statuses == []
+    assert vectors.deleted_document_ids == []
+    assert texts.deleted_document_ids == []
+
+
+class EmptyChunker:
+    """Return no chunk, like a scanned PDF without a text layer."""
+
+    def create_chunks(self, document: DocumentContent) -> list[Chunk]:
+        """Return an empty chunk list."""
+        del document
+        return []
+
+
+class BlankChunker:
+    """Return a chunk whose text carries no searchable content."""
+
+    def create_chunks(self, document: DocumentContent) -> list[Chunk]:
+        """Return one whitespace-only chunk."""
+        del document
+        return [Chunk(content=" \n\t ", page=1, section=None, chunk_index=0)]
+
+
+def create_service_with_chunker(
+    chunker: object,
+    document_repository: FakeDocumentRepository,
+    vector_repository: FakeVectorRepository,
+    text_repository: FakeTextRepository,
+) -> DocumentIndexingService:
+    """Create an indexing service whose chunker yields no searchable text."""
+    return DocumentIndexingService(
+        document_repository=document_repository,
+        parsing_service=FakeParser(),
+        chunk_service=chunker,  # type: ignore[arg-type]
+        embedding_service=FakeEmbeddingProvider(),
+        vector_repository=vector_repository,
+        text_repository=text_repository,
+    )
+
+
+@pytest.mark.parametrize("chunker", [EmptyChunker(), BlankChunker()])
+def test_document_without_searchable_text_is_marked_failed(chunker: object) -> None:
+    """Zero searchable chunks fail the job instead of reporting empty success."""
+    document = create_document()
+    documents = FakeDocumentRepository()
+    vectors = FakeVectorRepository()
+    texts = FakeTextRepository()
+
+    with pytest.raises(DocumentTextEmptyError, match="no searchable text"):
+        create_service_with_chunker(chunker, documents, vectors, texts).index(
+            document,
+            "owner-a",
+        )
+
+    assert documents.statuses == [DocumentStatus.FAILED]
+    assert vectors.replaced is False
+    assert texts.replaced is False
     assert vectors.deleted_document_ids == []
     assert texts.deleted_document_ids == []

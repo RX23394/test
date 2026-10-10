@@ -92,6 +92,8 @@ def test_chat_returns_content_and_preserves_messages() -> None:
         model="compatible-model",
         messages=messages,
         stream=False,
+        temperature=0.0,
+        max_tokens=1024,
     )
 
 
@@ -120,8 +122,39 @@ def test_stream_chat_yields_non_empty_sdk_deltas() -> None:
         model="compatible-model",
         messages=messages,
         stream=True,
+        temperature=0.0,
+        max_tokens=1024,
     )
     stream_context.__exit__.assert_called_once()
+
+
+def test_provider_uses_configured_sampling_and_token_limits() -> None:
+    """Temperature and max tokens come from settings instead of provider defaults."""
+    client = MagicMock()
+    client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))]
+    )
+    settings = Settings(
+        openai_base_url="http://compatible.test/v1",
+        openai_api_key="test-key",
+        openai_model="compatible-model",
+        openai_temperature=0.25,
+        openai_max_tokens=256,
+    )
+    provider = LLMProvider(cast(OpenAI, client), settings)
+
+    provider.chat(create_messages())
+
+    assert client.chat.completions.create.call_args.kwargs["temperature"] == 0.25
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 256
+
+
+def test_grounded_answers_default_to_deterministic_output() -> None:
+    """Default settings disable sampling and cap the completion length."""
+    settings = create_settings()
+
+    assert settings.openai_temperature == 0.0
+    assert settings.openai_max_tokens == 1024
 
 
 @pytest.mark.parametrize(

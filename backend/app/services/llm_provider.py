@@ -29,6 +29,8 @@ class LLMProvider:
             timeout=resolved_settings.openai_timeout_seconds,
         )
         self._model = resolved_settings.openai_model
+        self._temperature = resolved_settings.openai_temperature
+        self._max_tokens = resolved_settings.openai_max_tokens
 
     def chat(self, messages: Sequence[ChatCompletionMessageParam]) -> str:
         """Return one complete response without modifying caller messages."""
@@ -37,6 +39,8 @@ class LLMProvider:
                 model=self._model,
                 messages=list(messages),
                 stream=False,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
             )
         except Exception as exc:
             translated_error = translate_openai_error(exc)
@@ -60,6 +64,8 @@ class LLMProvider:
                 model=self._model,
                 messages=list(messages),
                 stream=True,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
             ) as stream:
                 for chunk in stream:
                     if not chunk.choices:

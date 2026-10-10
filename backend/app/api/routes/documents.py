@@ -35,6 +35,7 @@ from app.services.indexing import (
     DocumentIndexError,
     DocumentIndexingService,
     DocumentIndexOwnershipError,
+    DocumentTextEmptyError,
 )
 
 router = APIRouter(prefix="/api/admin/documents", tags=["admin-documents"])
@@ -236,6 +237,7 @@ def index_document(
             detail="Document is already indexed",
         )
 
+    settings = get_settings()
     job_id = str(uuid4())
     claimed_document = repository.claim_for_indexing(document_id, job_id)
     if claimed_document is None:
@@ -244,7 +246,6 @@ def index_document(
             detail="Document indexing is already in progress",
         )
 
-    settings = get_settings()
     service = DocumentIndexingService(
         document_repository=repository,
         parsing_service=DocumentParsingService(
@@ -274,6 +275,11 @@ def index_document(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Document could not be parsed",
+        ) from exc
+    except DocumentTextEmptyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document contains no extractable text; scanned files need OCR",
         ) from exc
     except DocumentIndexOwnershipError as exc:
         raise HTTPException(
