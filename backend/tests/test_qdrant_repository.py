@@ -78,3 +78,28 @@ def test_qdrant_repository_replaces_document_chunks() -> None:
         limit=10,
     )
     assert len(replaced_points) == 1
+
+
+def test_qdrant_repository_applies_the_configured_score_threshold() -> None:
+    """Only points above the similarity floor are returned."""
+    client = QdrantClient(location=":memory:")
+    repository = QdrantChunkRepository(
+        url="http://unused",
+        collection_name="threshold_chunks",
+        client=client,
+        score_threshold=0.99,
+    )
+    document = create_document()
+    chunks = [
+        Chunk(content="close match", page=1, section=None, chunk_index=0),
+        Chunk(content="distant match", page=2, section=None, chunk_index=1),
+    ]
+    vectors = [[1.0] + [0.0] * (EMBEDDING_DIMENSION - 1), [0.0, 1.0] + [0.0] * 382]
+    repository.replace_document_chunks(document, chunks, vectors)
+
+    candidates = repository.search(
+        [1.0] + [0.0] * (EMBEDDING_DIMENSION - 1),
+        limit=10,
+    )
+
+    assert [candidate.chunk_index for candidate in candidates] == [0]

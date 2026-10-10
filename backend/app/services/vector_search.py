@@ -6,7 +6,7 @@ from typing import Protocol
 
 from app.schemas.search import RetrievalCandidate
 
-VECTOR_SEARCH_TOP_K = 20
+VECTOR_SEARCH_TOP_K = 30
 
 
 class QueryEmbeddingProvider(Protocol):
@@ -47,13 +47,16 @@ class VectorSearchService:
         self,
         embedding_service: QueryEmbeddingProvider,
         qdrant_repository: VectorRepository,
+        *,
+        min_score: float = 0.0,
     ) -> None:
-        """Initialize query embedding and vector search dependencies."""
+        """Initialize query embedding, vector search, and the relevance floor."""
         self._embedding_service = embedding_service
         self._qdrant_repository = qdrant_repository
+        self._min_score = min_score
 
     def search(self, question: str) -> list[VectorSearchResult]:
-        """Embed a non-empty question and return at most twenty matches."""
+        """Embed a non-empty question and return its relevant Top30 matches."""
         normalized_question = question.strip()
         if not normalized_question:
             raise ValueError("question must not be empty")
@@ -64,6 +67,11 @@ class VectorSearchService:
             query_vectors[0],
             limit=VECTOR_SEARCH_TOP_K,
         )
+        relevant = [
+            candidate
+            for candidate in candidates[:VECTOR_SEARCH_TOP_K]
+            if candidate.score >= self._min_score
+        ]
         return [
             VectorSearchResult(
                 score=candidate.score,
@@ -72,5 +80,5 @@ class VectorSearchService:
                 page=candidate.page,
                 section=candidate.section,
             )
-            for candidate in candidates[:VECTOR_SEARCH_TOP_K]
+            for candidate in relevant
         ]

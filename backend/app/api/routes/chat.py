@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth.dependencies import CurrentUser, SessionDependency
+from app.core.config import get_settings
 from app.db.session import SessionFactoryDependency
 from app.rag.dependencies import EmbeddingDependency, LLMDependency, QdrantDependency
 from app.repositories.conversation import ConversationRepository
@@ -220,6 +221,7 @@ def stream_chat(
         embedding_provider=embedding_service,
         vector_repository=qdrant_repository,
         text_repository=FtsChunkRepository(session),
+        min_vector_score=get_settings().retrieval_min_score,
     )
     try:
         results = search_service.search(payload.message)

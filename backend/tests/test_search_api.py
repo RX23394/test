@@ -150,7 +150,7 @@ async def test_search_api_returns_retrieval_results_without_chat_model(
         "score": pytest.approx(2 / 61),
     }
     assert encoder.sentences == [f"query: {query}"]
-    assert qdrant.limit == 20
+    assert qdrant.limit == 30
     assert chat_calls == []
 
 

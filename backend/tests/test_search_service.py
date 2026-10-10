@@ -115,6 +115,27 @@ def shared_keyword_result() -> KeywordSearchResult:
     )
 
 
+def test_search_service_drops_vector_results_below_the_relevance_floor() -> None:
+    """Weak vector results are filtered before fusion reaches the caller."""
+    weak_vector_result = VectorSearchResult(
+        score=0.51,
+        chunk="unrelated text",
+        document=9,
+        page=1,
+        section=None,
+    )
+    service = SearchService(
+        FakeVectorSearchService([shared_vector_result(), weak_vector_result]),
+        FakeKeywordSearchService([]),
+        min_vector_score=0.87,
+    )
+
+    results = service.search("OSPF")
+
+    assert [result.document for result in results] == [7]
+    assert results[0].chunk == "OSPF routing"
+
+
 def test_search_service_runs_vector_keyword_then_rrf() -> None:
     """The normalized question flows through both searches before fusion."""
     calls: list[str] = []

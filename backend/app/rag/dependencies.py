@@ -25,6 +25,7 @@ def get_qdrant_repository() -> QdrantChunkRepository:
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
         collection_name=settings.qdrant_collection_name,
+        score_threshold=settings.retrieval_min_score,
     )
 
 

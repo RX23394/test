@@ -69,18 +69,32 @@ def create_candidate(index: int) -> RetrievalCandidate:
     )
 
 
-def test_vector_search_adds_query_prefix_and_requests_top20() -> None:
-    """The service embeds with query prefix and requests exactly Top20."""
+def test_vector_search_adds_query_prefix_and_requests_top30() -> None:
+    """The service embeds with query prefix and requests exactly Top30."""
     encoder = FakeSentenceEncoder()
-    repository = FakeQdrantRepository([create_candidate(index) for index in range(25)])
+    repository = FakeQdrantRepository([create_candidate(index) for index in range(35)])
     service = VectorSearchService(EmbeddingService(encoder), repository)
 
     results = service.search("  How does OSPF work?  ")
 
     assert encoder.sentences == ["query: How does OSPF work?"]
-    assert repository.limit == VECTOR_SEARCH_TOP_K == 20
+    assert repository.limit == VECTOR_SEARCH_TOP_K == 30
     assert len(repository.vector) == EMBEDDING_DIMENSION
-    assert len(results) == 20
+    assert len(results) == 30
+
+
+def test_vector_search_drops_candidates_below_the_relevance_floor() -> None:
+    """Candidates scoring under the configured floor are not returned."""
+    candidates = [create_candidate(0), create_candidate(20)]
+    service = VectorSearchService(
+        EmbeddingService(FakeSentenceEncoder()),
+        FakeQdrantRepository(candidates),
+        min_score=0.87,
+    )
+
+    results = service.search("OSPF")
+
+    assert [result.score for result in results] == [1.0]
 
 
 def test_vector_search_maps_required_result_fields() -> None:

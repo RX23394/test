@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Self
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 project_root = Path(__file__).resolve().parents[3]
@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_api_key: str | None = None
     qdrant_collection_name: str = "document_chunks"
+    # Cosine similarity floor for vector candidates. Measured on the bundled
+    # multilingual-e5-small model, unrelated Chinese questions score around
+    # 0.78 while related ones score above 0.92, so retrieval without a floor
+    # always filled the prompt with eight irrelevant chunks.
+    retrieval_min_score: float = Field(default=0.87, ge=0.0, le=1.0)
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = "not-required"
     openai_model: str = "gpt-4o-mini"

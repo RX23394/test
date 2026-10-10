@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException, status
 
 from app.auth.dependencies import CurrentUser, SessionDependency
+from app.core.config import get_settings
 from app.rag.dependencies import EmbeddingDependency, QdrantDependency
 from app.repositories.document import DocumentRepository
 from app.repositories.fts import FtsChunkRepository
@@ -33,12 +34,15 @@ def search_documents(
 ) -> ResponseModel[list[SearchApiResult]]:
     """Return retrieval results without answer generation."""
     del current_user
+    settings = get_settings()
     service = SearchService(
         vector_search_service=VectorSearchService(
             embedding_service,
             qdrant_repository,
+            min_score=settings.retrieval_min_score,
         ),
         keyword_search_service=KeywordSearchService(FtsChunkRepository(session)),
+        min_vector_score=settings.retrieval_min_score,
     )
     try:
         results = service.search(payload.query)

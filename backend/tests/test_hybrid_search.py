@@ -68,11 +68,11 @@ def make_candidate(chunk_index: int) -> RetrievalCandidate:
     )
 
 
-def test_hybrid_search_uses_top20_rrf_and_returns_top8() -> None:
+def test_hybrid_search_uses_top30_rrf_and_returns_top8() -> None:
     """Overlapping candidates are RRF boosted and the result is limited to eight."""
     embedding_provider = FakeQueryEmbeddingProvider()
     vector_repository = FakeVectorRepository(
-        [make_candidate(index) for index in range(20)]
+        [make_candidate(index) for index in range(30)]
     )
     text_repository = FakeTextRepository(
         [make_candidate(index) for index in range(7, 27)]
@@ -86,8 +86,58 @@ def test_hybrid_search_uses_top20_rrf_and_returns_top8() -> None:
     results = service.search("routing")
 
     assert embedding_provider.query == "routing"
-    assert vector_repository.limit == VECTOR_SEARCH_LIMIT == 20
+    assert vector_repository.limit == VECTOR_SEARCH_LIMIT == 30
     assert text_repository.limit == FTS_SEARCH_LIMIT == 20
     assert len(results) == HYBRID_RESULT_LIMIT == 8
     assert results[0].chunk_index == 7
-    assert {result.chunk_index for result in results}.issubset(set(range(7, 20)))
+    assert {result.chunk_index for result in results}.issubset(set(range(7, 30)))
+
+
+def test_hybrid_search_drops_vector_candidates_below_the_relevance_floor() -> None:
+    """Weak vector matches never reach the prompt, even when keywords boost them."""
+    weak_vector_candidate = RetrievalCandidate(
+        document_id=1,
+        chunk_index=0,
+        content="unrelated chunk",
+        score=0.5,
+    )
+    strong_vector_candidate = RetrievalCandidate(
+        document_id=1,
+        chunk_index=1,
+        content="relevant chunk",
+        score=0.93,
+    )
+    text_candidate = RetrievalCandidate(
+        document_id=1,
+        chunk_index=2,
+        content="keyword-only chunk",
+        score=1.0,
+    )
+    service = HybridSearchService(
+        FakeQueryEmbeddingProvider(),
+        FakeVectorRepository([weak_vector_candidate, strong_vector_candidate]),
+        FakeTextRepository([text_candidate]),
+        min_vector_score=0.87,
+    )
+
+    results = service.search("routing")
+
+    assert {result.chunk_index for result in results} == {1, 2}
+
+
+def test_hybrid_search_returns_nothing_without_any_relevant_candidate() -> None:
+    """An empty knowledge base leaves the insufficient-knowledge path reachable."""
+    weak_candidate = RetrievalCandidate(
+        document_id=1,
+        chunk_index=0,
+        content="unrelated chunk",
+        score=0.42,
+    )
+    service = HybridSearchService(
+        FakeQueryEmbeddingProvider(),
+        FakeVectorRepository([weak_candidate]),
+        FakeTextRepository([]),
+        min_vector_score=0.87,
+    )
+
+    assert service.search("routing") == []

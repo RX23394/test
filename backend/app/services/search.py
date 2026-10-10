@@ -12,7 +12,7 @@ from app.services.vector_search import VectorSearchResult
 
 logger = logging.getLogger(__name__)
 
-VECTOR_SEARCH_LIMIT = 20
+VECTOR_SEARCH_LIMIT = 30
 FTS_SEARCH_LIMIT = 20
 HYBRID_RESULT_LIMIT = 8
 RRF_K = 60
@@ -58,20 +58,33 @@ class HybridSearchService:
         embedding_provider: QueryEmbeddingProvider,
         vector_repository: VectorSearchRepository,
         text_repository: TextSearchRepository,
+        *,
+        min_vector_score: float = 0.0,
     ) -> None:
-        """Initialize hybrid retrieval dependencies."""
+        """Initialize hybrid retrieval dependencies and the relevance floor.
+
+        ``min_vector_score`` is the second relevance gate: the repository also
+        applies its own threshold, but RRF can still promote a weak vector match
+        when it also appears in the keyword list, so candidates are re-checked
+        here before fusion.
+        """
         self._embedding_provider = embedding_provider
         self._vector_repository = vector_repository
         self._text_repository = text_repository
+        self._min_vector_score = min_vector_score
 
     def search(self, query: str) -> list[SearchResult]:
-        """Retrieve Top20 per source, apply RRF, and return Top8."""
+        """Retrieve Top30 vector and Top20 keyword candidates, then return Top8."""
         try:
             query_vectors = self._embedding_provider.embed_query(query)
-            vector_candidates = self._vector_repository.search(
-                query_vectors[0],
-                VECTOR_SEARCH_LIMIT,
-            )
+            vector_candidates = [
+                candidate
+                for candidate in self._vector_repository.search(
+                    query_vectors[0],
+                    VECTOR_SEARCH_LIMIT,
+                )
+                if candidate.score >= self._min_vector_score
+            ]
             text_candidates = self._text_repository.search(
                 query,
                 FTS_SEARCH_LIMIT,
@@ -160,18 +173,25 @@ class SearchService:
         vector_search_service: VectorQuestionSearch,
         keyword_search_service: KeywordQuestionSearch,
         rrf_service: RankFusion | None = None,
+        *,
+        min_vector_score: float = 0.0,
     ) -> None:
-        """Initialize both retrievers and an optional fusion service."""
+        """Initialize both retrievers, fusion, and the relevance floor."""
         self._vector_search_service = vector_search_service
         self._keyword_search_service = keyword_search_service
         self._rrf_service = rrf_service if rrf_service is not None else RRFService()
+        self._min_vector_score = min_vector_score
 
     def search(self, question: str) -> list[SearchServiceResult]:
         """Retrieve, fuse, and return at most eight chunks for a question."""
         normalized_question = question.strip()
         if not normalized_question:
             raise ValueError("question must not be empty")
-        vector_results = self._vector_search_service.search(normalized_question)
+        vector_results = [
+            result
+            for result in self._vector_search_service.search(normalized_question)
+            if result.score >= self._min_vector_score
+        ]
         keyword_results = self._keyword_search_service.search(normalized_question)
         fused_results = self._rrf_service.fuse(vector_results, keyword_results)
         return [

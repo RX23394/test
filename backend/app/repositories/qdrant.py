@@ -23,10 +23,12 @@ class QdrantChunkRepository:
         collection_name: str,
         api_key: str | None = None,
         client: QdrantClient | None = None,
+        score_threshold: float | None = None,
     ) -> None:
         """Initialize the repository with Qdrant connection settings."""
         self._collection_name = collection_name
         self._client = client or QdrantClient(url=url, api_key=api_key)
+        self._score_threshold = score_threshold
 
     def replace_document_chunks(
         self,
@@ -70,7 +72,7 @@ class QdrantChunkRepository:
         vector: Sequence[float],
         limit: int,
     ) -> list[RetrievalCandidate]:
-        """Return cosine-ranked chunk candidates from Qdrant."""
+        """Return cosine-ranked chunk candidates above the similarity floor."""
         if not self._client.collection_exists(self._collection_name):
             return []
         response = self._client.query_points(
@@ -79,6 +81,7 @@ class QdrantChunkRepository:
             limit=limit,
             with_payload=True,
             with_vectors=False,
+            score_threshold=self._score_threshold,
         )
         candidates: list[RetrievalCandidate] = []
         for point in response.points:
