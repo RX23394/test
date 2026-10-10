@@ -19,6 +19,9 @@ if config.config_file_name is not None:
 
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = Base.metadata
+# The search tables are FTS5 virtual tables. SQLAlchemy cannot represent them in
+# metadata, so they stay owned by the migrations that create them and are
+# excluded from autogenerate instead of being recreated as plain tables.
 FTS_TABLE_PREFIXES = ("document_chunks_fts", "chunk_index")
 
 
@@ -49,6 +52,9 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_object=include_object,
+        # SQLite cannot ALTER most columns in place, so autogenerate has to emit
+        # batch operations; without this the next ALTER raises on SQLite.
+        render_as_batch=True,
     )
 
     with context.begin_transaction():
@@ -68,6 +74,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             include_object=include_object,
+            render_as_batch=True,
         )
 
         with context.begin_transaction():
