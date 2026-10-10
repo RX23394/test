@@ -45,6 +45,41 @@ def test_conversation_service_creates_and_lists_only_owned_conversations(
         assert [item.id for item in service.list(second_user_id)] == [other.id]
 
 
+def test_conversation_service_returns_only_the_newest_messages(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The follow-up window is bounded, ordered, and ownership-checked."""
+    with session_factory() as session:
+        user_id = create_user(session, "recent-message-owner")
+        other_user_id = create_user(session, "recent-message-other")
+        service = ConversationService(ConversationRepository(session))
+        conversation = service.create(user_id, "OSPF")
+        for index in range(3):
+            service.add_message(
+                conversation.id,
+                user_id,
+                MessageRole.USER,
+                f"question {index}",
+            )
+            service.add_message(
+                conversation.id,
+                user_id,
+                MessageRole.ASSISTANT,
+                f"answer {index}",
+            )
+
+        recent = service.recent_messages(conversation.id, user_id, limit=3)
+
+        assert [message.content for message in recent] == [
+            "answer 1",
+            "question 2",
+            "answer 2",
+        ]
+        assert service.recent_messages(conversation.id, user_id, limit=0) == []
+        with pytest.raises(ConversationNotFoundError):
+            service.recent_messages(conversation.id, other_user_id, limit=3)
+
+
 def test_conversation_service_saves_user_and_assistant_messages_in_order(
     session_factory: sessionmaker[Session],
 ) -> None:

@@ -55,6 +55,10 @@ class FakeMarkdownParser(Parser):
 class FixedEncoder:
     """Return deterministic vectors without loading model weights."""
 
+    def __init__(self) -> None:
+        """Initialize the recorded encoder inputs."""
+        self.sentences: list[str] = []
+
     def encode(
         self,
         sentences: list[str],
@@ -69,6 +73,7 @@ class FixedEncoder:
         assert all(
             sentence.startswith(("passage: ", "query: ")) for sentence in sentences
         )
+        self.sentences.extend(sentences)
         return np.ones((len(sentences), EMBEDDING_DIMENSION), dtype=np.float32)
 
 
@@ -143,6 +148,7 @@ async def test_index_endpoint_writes_chunks_to_qdrant(
     settings: Settings = get_settings()
     monkeypatch.setattr(settings, "document_upload_dir", tmp_path)
     monkeypatch.setattr(document_routes, "ChunkService", FixedChunkService)
+    encoder = FixedEncoder()
     qdrant_client = QdrantClient(location=":memory:")
     qdrant_repository = QdrantChunkRepository(
         url="http://unused",
@@ -152,7 +158,7 @@ async def test_index_endpoint_writes_chunks_to_qdrant(
 
     def override_embedding_service() -> EmbeddingService:
         """Return a deterministic embedding service for the endpoint."""
-        return EmbeddingService(FixedEncoder())
+        return EmbeddingService(encoder)
 
     def override_qdrant_repository() -> QdrantChunkRepository:
         """Return the in-memory Qdrant repository for the endpoint."""
@@ -235,6 +241,21 @@ async def test_index_endpoint_writes_chunks_to_qdrant(
     assert '"data":"[S1]."' in chat_response.text
     assert "event: done" in chat_response.text
     assert "section: Routing" in str(llm_provider.messages)
+
+    # A follow-up carries no retrievable terms of its own, so the previous
+    # question is prepended to the embedding query and replayed to the model.
+    encoder.sentences.clear()
+    follow_up_response = await client.post(
+        "/api/chat/stream",
+        json={"conversation_id": conversation_id, "message": "那它的缺点呢？"},
+    )
+    assert follow_up_response.status_code == 200
+    assert encoder.sentences == ["query: What is OSPF?\n那它的缺点呢？"]
+    replayed_roles = [message["role"] for message in llm_provider.messages]
+    assert replayed_roles == ["system", "user", "assistant", "user"]
+    assert llm_provider.messages[1]["content"] == "What is OSPF?"
+    assert llm_provider.messages[2]["content"] == "OSPF is a routing protocol [S1]."
+
     with session_factory() as session:
         indexed_document = DocumentRepository(session).get_by_id(document_id)
         assert indexed_document is not None
@@ -243,4 +264,9 @@ async def test_index_endpoint_writes_chunks_to_qdrant(
             conversation_id,
             uploader_id,
         )
-        assert [message.role for message in detail.messages] == ["user", "assistant"]
+        assert [message.role for message in detail.messages] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]

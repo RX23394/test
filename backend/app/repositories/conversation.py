@@ -118,6 +118,26 @@ class ConversationRepository:
         )
         return self._session.scalars(statement).all()
 
+    def list_recent_messages(
+        self,
+        conversation_id: int,
+        limit: int,
+    ) -> Sequence[Message]:
+        """Return the newest messages of a conversation in chronological order.
+
+        Only the newest rows are read, so a long conversation does not load its
+        whole history just to build a follow-up question.
+        """
+        if limit <= 0:
+            return []
+        statement = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit)
+        )
+        return list(reversed(self._session.scalars(statement).all()))
+
     def delete(self, conversation: Conversation) -> None:
         """Delete a conversation and all of its messages atomically."""
         try:

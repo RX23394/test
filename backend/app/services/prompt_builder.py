@@ -6,8 +6,10 @@ from typing import Protocol, cast
 from openai.types.chat import ChatCompletionMessageParam
 
 from app.services.search import SearchServiceResult
+from app.services.token_counter import TokenCounter
 
 PROMPT_CONTEXT_LIMIT = 8
+DEFAULT_HISTORY_TOKEN_BUDGET = 512
 INSUFFICIENT_KNOWLEDGE_RESPONSE = (
     "\u5f53\u524d\u77e5\u8bc6\u5e93" "\u6ca1\u6709\u8db3\u591f\u8d44\u6599\u3002"
 )
@@ -35,8 +37,25 @@ class CitationPromptSource(Protocol):
     section: str | None
 
 
+class PromptHistoryMessage(Protocol):
+    """Message fields required to replay previous conversation turns."""
+
+    role: str
+    content: str
+
+
 class PromptBuilder:
     """Build grounded system and user messages from retrieved chunks."""
+
+    def __init__(
+        self,
+        history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET,
+    ) -> None:
+        """Initialize the token budget available for replayed conversation turns."""
+        if history_token_budget < 0:
+            raise ValueError("history_token_budget must not be negative")
+        self._history_token_budget = history_token_budget
+        self._token_counter = TokenCounter()
 
     def build(
         self,
@@ -61,8 +80,9 @@ class PromptBuilder:
         self,
         question: str,
         sources: Sequence[CitationPromptSource],
+        history: Sequence[PromptHistoryMessage] = (),
     ) -> list[ChatCompletionMessageParam]:
-        """Build grounded messages from API citation sources."""
+        """Build grounded messages, replaying recent turns within the budget."""
         normalized_question = question.strip()
         if not normalized_question:
             raise ValueError("question must not be empty")
@@ -77,18 +97,43 @@ class PromptBuilder:
                 f"[{source.label}]\n" f"{' | '.join(metadata)}\n" f"{source.content}"
             )
         context = "\n\n".join(blocks) or "\u65e0\u53ef\u7528\u8d44\u6599\u3002"
-        return cast(
-            list[ChatCompletionMessageParam],
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Question:\n{normalized_question}\n\nContext:\n{context}"
-                    ),
-                },
-            ],
-        )
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *self._build_history(history),
+            {
+                "role": "user",
+                "content": (f"Question:\n{normalized_question}\n\nContext:\n{context}"),
+            },
+        ]
+        return cast(list[ChatCompletionMessageParam], messages)
+
+    def _build_history(
+        self,
+        history: Sequence[PromptHistoryMessage],
+    ) -> list[dict[str, str]]:
+        """Return the newest turns that fit the history token budget, in order.
+
+        Walking backwards keeps the window contiguous and drops older turns
+        first; a suffix that would start with an answer is trimmed so the replay
+        never opens with a reply to a question the model cannot see.
+        """
+        selected: list[dict[str, str]] = []
+        token_count = 0
+        for message in reversed(list(history)):
+            if message.role not in ("user", "assistant"):
+                continue
+            content = message.content.strip()
+            if not content:
+                continue
+            message_tokens = self._token_counter.count(content)
+            if token_count + message_tokens > self._history_token_budget:
+                break
+            selected.append({"role": message.role, "content": content})
+            token_count += message_tokens
+        selected.reverse()
+        if selected and selected[0]["role"] == "assistant":
+            selected.pop(0)
+        return selected
 
     @staticmethod
     def _build_context(chunks: Sequence[SearchServiceResult]) -> str:

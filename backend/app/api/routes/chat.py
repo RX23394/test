@@ -1,7 +1,7 @@
 """Authenticated citation-grounded streaming endpoint."""
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, status
@@ -32,7 +32,13 @@ from app.services.llm_errors import (
     LLMTokenLimitError,
 )
 from app.services.llm_provider import LLMProvider
-from app.services.prompt_builder import INSUFFICIENT_KNOWLEDGE_RESPONSE, PromptBuilder
+from app.services.prompt_builder import (
+    DEFAULT_HISTORY_TOKEN_BUDGET,
+    INSUFFICIENT_KNOWLEDGE_RESPONSE,
+    PromptBuilder,
+    PromptHistoryMessage,
+)
+from app.services.retrieval_query import build_retrieval_query
 from app.services.search import HybridSearchError, HybridSearchService
 
 logger = logging.getLogger(__name__)
@@ -68,6 +74,9 @@ def stream_chat_events(
     citations: list[Citation],
     llm_provider: LLMProvider,
     on_complete: Callable[[str], None] | None = None,
+    *,
+    history: Sequence[PromptHistoryMessage] = (),
+    history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET,
 ) -> Iterator[str]:
     """Yield source, text delta, completion, or streaming error events."""
     if not sources:
@@ -96,7 +105,11 @@ def stream_chat_events(
 
     answer_parts: list[str] = []
     try:
-        messages = PromptBuilder().build_from_sources(query, sources)
+        messages = PromptBuilder(history_token_budget).build_from_sources(
+            query,
+            sources,
+            history,
+        )
         for content in llm_provider.stream_chat(messages):
             answer_parts.append(content)
             yield serialize_sse(
@@ -208,6 +221,7 @@ def stream_chat(
     session_factory: SessionFactoryDependency,
 ) -> StreamingResponse:
     """Retrieve Top8 sources and stream a citation-grounded answer."""
+    settings = get_settings()
     conversation_service = ConversationService(ConversationRepository(session))
     try:
         conversation_service.get(payload.conversation_id, current_user.id)
@@ -217,14 +231,26 @@ def stream_chat(
             detail="Conversation not found",
         ) from exc
 
+    # One turn is a question plus its answer; only the newest window is read.
+    history = conversation_service.recent_messages(
+        payload.conversation_id,
+        current_user.id,
+        limit=settings.chat_history_turns * 2,
+    )
     search_service = HybridSearchService(
         embedding_provider=embedding_service,
         vector_repository=qdrant_repository,
         text_repository=FtsChunkRepository(session),
-        min_vector_score=get_settings().retrieval_min_score,
+        min_vector_score=settings.retrieval_min_score,
     )
     try:
-        results = search_service.search(payload.message)
+        results = search_service.search(
+            build_retrieval_query(
+                payload.message,
+                history,
+                turns=settings.chat_history_turns,
+            )
+        )
     except HybridSearchError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -260,5 +286,7 @@ def stream_chat(
             citations,
             llm_provider,
             persist_exchange,
+            history=history,
+            history_token_budget=settings.chat_history_max_tokens,
         )
     )

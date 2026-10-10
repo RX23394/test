@@ -1,6 +1,7 @@
 """Tests for named server-sent chat streaming events."""
 
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from typing import cast
 
 import pytest
@@ -54,6 +55,30 @@ class FailingAfterTokenChatService:
         raise RuntimeError("stream interrupted")
 
 
+class RecordingChatService:
+    """Record the exact SDK messages handed to the provider."""
+
+    def __init__(self) -> None:
+        """Initialize an empty message log."""
+        self.messages: list[dict[str, str]] = []
+
+    def stream_chat(
+        self,
+        messages: Sequence[object],
+    ) -> Iterator[str]:
+        """Record the prompt and yield one token."""
+        self.messages = [dict(message) for message in messages]  # type: ignore[arg-type]
+        yield "answer"
+
+
+@dataclass(frozen=True)
+class HistoryTurn:
+    """One replayed conversation message."""
+
+    role: str
+    content: str
+
+
 def create_source() -> CitationSource:
     """Create one stable citation source for SSE tests."""
     return CitationSource(
@@ -93,6 +118,35 @@ def create_citation() -> Citation:
         section="Area",
         content="OSPF is a link-state routing protocol.",
     )
+
+
+def test_stream_replays_conversation_history_to_the_provider() -> None:
+    """Previous turns are replayed between the system prompt and the question."""
+    service = RecordingChatService()
+    history = [
+        HistoryTurn(role="user", content="What is OSPF?"),
+        HistoryTurn(role="assistant", content="A link-state routing protocol."),
+    ]
+
+    events = list(
+        stream_chat_events(
+            "那它的缺点呢？",
+            [create_source()],
+            [create_citation()],
+            cast(LLMProvider, service),
+            history=history,
+        )
+    )
+
+    assert "event: done" in "".join(events)
+    assert [message["role"] for message in service.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert service.messages[1]["content"] == "What is OSPF?"
+    assert "那它的缺点呢？" in service.messages[3]["content"]
 
 
 def test_stream_emits_named_citation_token_and_done_events() -> None:

@@ -1,14 +1,47 @@
 """Tests for retrieval-grounded prompt message construction."""
 
+from dataclasses import dataclass
+
 import pytest
 
 from app.services.prompt_builder import (
+    DEFAULT_HISTORY_TOKEN_BUDGET,
     INSUFFICIENT_KNOWLEDGE_RESPONSE,
     PROMPT_CONTEXT_LIMIT,
     SYSTEM_PROMPT,
     PromptBuilder,
 )
 from app.services.search import SearchServiceResult
+
+
+@dataclass(frozen=True)
+class HistoryTurn:
+    """One replayed conversation message."""
+
+    role: str
+    content: str
+
+
+@dataclass(frozen=True)
+class Source:
+    """Citation source double accepted by PromptBuilder."""
+
+    label: str
+    document_id: int
+    content: str
+    page: int | None
+    section: str | None
+
+
+def create_source(label: str = "S1") -> Source:
+    """Create one citation source for streaming prompt tests."""
+    return Source(
+        label=label,
+        document_id=7,
+        content="OSPF area design",
+        page=12,
+        section="Area",
+    )
 
 
 def create_chunk(index: int) -> SearchServiceResult:
@@ -110,3 +143,103 @@ def test_prompt_builder_rejects_blank_question() -> None:
     """A blank question is rejected before messages are constructed."""
     with pytest.raises(ValueError, match="question must not be empty"):
         PromptBuilder().build("  ", [create_chunk(0)])
+
+
+def test_prompt_builder_replays_history_before_the_grounded_question() -> None:
+    """Previous turns are injected as user and assistant messages in order."""
+    history = [
+        HistoryTurn(role="user", content="What is OSPF?"),
+        HistoryTurn(role="assistant", content="A link-state routing protocol."),
+    ]
+
+    messages = PromptBuilder().build_from_sources(
+        "那它的缺点呢？",
+        [create_source()],
+        history,
+    )
+
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert messages[1]["content"] == "What is OSPF?"
+    assert messages[2]["content"] == "A link-state routing protocol."
+    assert "那它的缺点呢？" in str(messages[3]["content"])
+    assert "[S1]" in str(messages[3]["content"])
+
+
+def test_prompt_builder_without_history_keeps_two_messages() -> None:
+    """A first question is unaffected by the history feature."""
+    messages = PromptBuilder().build_from_sources("What is OSPF?", [create_source()])
+
+    assert [message["role"] for message in messages] == ["system", "user"]
+
+
+def test_prompt_builder_drops_history_that_exceeds_the_token_budget() -> None:
+    """Older turns are dropped first so the prompt stays inside its budget."""
+    history = [
+        HistoryTurn(role="user", content="old question " * 20),
+        HistoryTurn(role="assistant", content="old answer"),
+        HistoryTurn(role="user", content="newest question"),
+    ]
+
+    messages = PromptBuilder(history_token_budget=5).build_from_sources(
+        "follow-up",
+        [create_source()],
+        history,
+    )
+
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    assert messages[1]["content"] == "newest question"
+
+
+def test_prompt_builder_trims_a_leading_answer_from_the_window() -> None:
+    """A budget cut in the middle of an exchange never opens with a reply."""
+    history = [
+        HistoryTurn(role="user", content="What is OSPF?" * 10),
+        HistoryTurn(role="assistant", content="A link-state protocol."),
+        HistoryTurn(role="user", content="and BGP?"),
+        HistoryTurn(role="assistant", content="A path-vector protocol."),
+    ]
+
+    messages = PromptBuilder(history_token_budget=15).build_from_sources(
+        "compare them",
+        [create_source()],
+        history,
+    )
+
+    replay = messages[1:-1]
+    assert replay
+    assert replay[0]["role"] == "user"
+    assert replay[-1]["role"] == "assistant"
+    assert "and BGP?" == replay[0]["content"]
+
+
+def test_prompt_builder_skips_unknown_history_roles_and_blank_content() -> None:
+    """Unsupported roles and empty messages never reach the model."""
+    history = [
+        HistoryTurn(role="tool", content="tool output"),
+        HistoryTurn(role="user", content="   "),
+        HistoryTurn(role="user", content="real question"),
+    ]
+
+    messages = PromptBuilder().build_from_sources(
+        "follow-up",
+        [create_source()],
+        history,
+    )
+
+    assert [message["content"] for message in messages[1:-1]] == ["real question"]
+
+
+def test_prompt_builder_rejects_a_negative_history_budget() -> None:
+    """A negative budget is a programming error, not a silent no-op."""
+    with pytest.raises(ValueError, match="history_token_budget"):
+        PromptBuilder(history_token_budget=-1)
+
+
+def test_default_history_budget_is_five_hundred_twelve_tokens() -> None:
+    """The documented default budget stays stable."""
+    assert DEFAULT_HISTORY_TOKEN_BUDGET == 512

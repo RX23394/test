@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 30
     auth_cookie_name: str = "network_rag_access_token"
     auth_cookie_secure: bool = False
+    # Follow-up questions such as "那它的缺点呢？" carry no retrievable terms, so the
+    # most recent user turns are prepended to the embedding query, and the newest
+    # turns are replayed to the model within a token budget.
+    chat_history_turns: int = Field(default=3, ge=0, le=20)
+    chat_history_max_tokens: int = Field(default=512, ge=0)
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Self:

@@ -51,6 +51,22 @@ class ConversationService:
         self._validate_id(user_id, "user_id")
         return self._repository.list_for_user(user_id)
 
+    def recent_messages(
+        self,
+        conversation_id: int,
+        user_id: int,
+        limit: int,
+    ) -> Sequence[Message]:
+        """Return the newest messages of an owned conversation in order.
+
+        ``Sequence`` rather than ``list``: this class also defines a ``list``
+        method, which shadows the builtin inside the class body.
+        """
+        if limit <= 0:
+            return []
+        conversation = self._require_conversation(conversation_id, user_id)
+        return self._repository.list_recent_messages(conversation.id, limit)
+
     def rename(
         self,
         conversation_id: int,
