@@ -4,9 +4,15 @@ import logging
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.api.pagination import (
+    DEFAULT_PAGE_SIZE,
+    LimitQuery,
+    OffsetQuery,
+    set_total_count_header,
+)
 from app.auth.dependencies import CurrentAdmin, SessionDependency
 from app.core.config import get_settings
 from app.models.document import DocumentStatus
@@ -50,11 +56,16 @@ logger = logging.getLogger(__name__)
 def list_documents(
     current_admin: CurrentAdmin,
     session: SessionDependency,
+    response: Response,
     search: str | None = Query(default=None, max_length=255),
+    limit: LimitQuery = DEFAULT_PAGE_SIZE,
+    offset: OffsetQuery = 0,
 ) -> ResponseModel[list[DocumentResponse]]:
-    """List documents for administrators with optional text search."""
+    """List one page of documents for administrators with optional search."""
     del current_admin
-    documents = DocumentRepository(session).list_all(search)
+    repository = DocumentRepository(session)
+    documents = repository.list_all(search, limit=limit, offset=offset)
+    set_total_count_header(response, repository.count_all(search))
     return ResponseModel(
         status="ok",
         data=[DocumentResponse.model_validate(document) for document in documents],

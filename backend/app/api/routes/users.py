@@ -1,8 +1,14 @@
 """Administrator user-management endpoints."""
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
 
+from app.api.pagination import (
+    DEFAULT_PAGE_SIZE,
+    LimitQuery,
+    OffsetQuery,
+    set_total_count_header,
+)
 from app.auth.dependencies import CurrentAdmin, SessionDependency
 from app.auth.security import hash_password
 from app.models.user import User
@@ -26,10 +32,15 @@ router = APIRouter(prefix="/api/admin/users", tags=["admin-users"])
 def list_users(
     current_admin: CurrentAdmin,
     session: SessionDependency,
+    response: Response,
+    limit: LimitQuery = DEFAULT_PAGE_SIZE,
+    offset: OffsetQuery = 0,
 ) -> ResponseModel[list[ManagedUserResponse]]:
-    """List all user accounts for an administrator."""
+    """List one page of user accounts for an administrator."""
     del current_admin
-    users = UserRepository(session).list_all()
+    repository = UserRepository(session)
+    users = repository.list_all(limit=limit, offset=offset)
+    set_total_count_header(response, repository.count_all())
     return ResponseModel(
         status="ok",
         data=[ManagedUserResponse.model_validate(user) for user in users],

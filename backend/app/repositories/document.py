@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Update, func, or_, select, update
+from sqlalchemy import Select, Update, func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -52,23 +52,40 @@ class DocumentRepository:
         )
         return self._session.scalars(statement).all()
 
-    def list_all(self, search: str | None = None) -> Sequence[Document]:
-        """Return all documents, optionally filtered by filename or digest."""
-        statement = select(Document)
-        normalized_search = search.strip() if search else ""
-        if normalized_search:
-            pattern = f"%{normalized_search}%"
-            statement = statement.where(
-                or_(
-                    Document.original_filename.ilike(pattern),
-                    Document.sha256.ilike(pattern),
-                )
-            )
-        statement = statement.order_by(
+    def list_all(
+        self,
+        search: str | None = None,
+        *,
+        limit: int,
+        offset: int = 0,
+    ) -> Sequence[Document]:
+        """Return one page of documents, optionally filtered by filename or digest."""
+        statement = self._filtered_statement(search).order_by(
             Document.created_at.desc(),
             Document.id.desc(),
         )
-        return self._session.scalars(statement).all()
+        return self._session.scalars(statement.limit(limit).offset(offset)).all()
+
+    def count_all(self, search: str | None = None) -> int:
+        """Return the total number of matching documents, ignoring pagination."""
+        statement = select(func.count()).select_from(
+            self._filtered_statement(search).subquery()
+        )
+        return int(self._session.scalar(statement) or 0)
+
+    def _filtered_statement(self, search: str | None) -> Select[tuple[Document]]:
+        """Build the shared document filter used by listing and counting."""
+        statement = select(Document)
+        normalized_search = search.strip() if search else ""
+        if not normalized_search:
+            return statement
+        pattern = f"%{normalized_search}%"
+        return statement.where(
+            or_(
+                Document.original_filename.ilike(pattern),
+                Document.sha256.ilike(pattern),
+            )
+        )
 
     def create(
         self,

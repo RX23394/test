@@ -218,6 +218,10 @@ python -m app.cli.reap_stale_indexing --lease-seconds 300
 FTS5 与源文件，最后才删行。任一步失败都会返回 503 并保留该状态，向量服务恢复后
 重复删除同一文档即可完成，不会留下孤儿向量。
 
+**列表接口都是分页的。** 文档、用户、会话列表接受 `limit`（1–200，默认 100）与
+`offset`，并在响应头返回未分页的总数 `X-Total-Count`（跨域时通过 CORS
+`expose_headers` 暴露）。前端目前按默认页大小取第一页，分页控件属于后续工作。
+
 **登出会立即吊销已有 token。** `users.token_version` 随登出递增，JWT 携带 `ver`
 声明，版本不匹配的 token 一律 401。新增改密接口时同样需要递增该版本。
 

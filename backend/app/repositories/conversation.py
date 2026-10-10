@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -41,14 +41,31 @@ class ConversationRepository:
         )
         return self._session.scalar(statement)
 
-    def list_for_user(self, user_id: int) -> Sequence[Conversation]:
-        """Return one user's conversations in newest-first order."""
+    def list_for_user(
+        self,
+        user_id: int,
+        *,
+        limit: int,
+        offset: int = 0,
+    ) -> Sequence[Conversation]:
+        """Return one page of a user's conversations in newest-first order."""
         statement = (
             select(Conversation)
             .where(Conversation.user_id == user_id)
             .order_by(Conversation.created_at.desc(), Conversation.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
         return self._session.scalars(statement).all()
+
+    def count_for_user(self, user_id: int) -> int:
+        """Return how many conversations a user owns, ignoring pagination."""
+        statement = (
+            select(func.count())
+            .select_from(Conversation)
+            .where(Conversation.user_id == user_id)
+        )
+        return int(self._session.scalar(statement) or 0)
 
     def rename(self, conversation: Conversation, title: str) -> Conversation:
         """Persist a new title for a conversation."""

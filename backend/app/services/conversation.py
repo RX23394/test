@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from app.api.pagination import DEFAULT_PAGE_SIZE
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole
 from app.repositories.conversation import ConversationRepository
@@ -46,10 +47,21 @@ class ConversationService:
         messages = list(self._repository.list_messages(conversation.id))
         return ConversationDetail(conversation=conversation, messages=messages)
 
-    def list(self, user_id: int) -> Sequence[Conversation]:
-        """Return all conversations owned by a user, newest first."""
+    def list(
+        self,
+        user_id: int,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> Sequence[Conversation]:
+        """Return one page of a user's conversations, newest first."""
         self._validate_id(user_id, "user_id")
-        return self._repository.list_for_user(user_id)
+        return self._repository.list_for_user(user_id, limit=limit, offset=offset)
+
+    def count(self, user_id: int) -> int:
+        """Return how many conversations a user owns."""
+        self._validate_id(user_id, "user_id")
+        return self._repository.count_for_user(user_id)
 
     def recent_messages(
         self,

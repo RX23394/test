@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -25,10 +25,19 @@ class UserRepository:
         statement = select(User).where(User.username == username)
         return self._session.scalar(statement)
 
-    def list_all(self) -> Sequence[User]:
-        """Return all users ordered by newest account first."""
-        statement = select(User).order_by(User.created_at.desc(), User.id.desc())
+    def list_all(self, *, limit: int, offset: int = 0) -> Sequence[User]:
+        """Return one page of users ordered by newest account first."""
+        statement = (
+            select(User)
+            .order_by(User.created_at.desc(), User.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
         return self._session.scalars(statement).all()
+
+    def count_all(self) -> int:
+        """Return the total number of users, ignoring pagination."""
+        return int(self._session.scalar(select(func.count()).select_from(User)) or 0)
 
     def create(
         self,

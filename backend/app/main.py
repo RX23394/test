@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException
 
+from app.api.pagination import TOTAL_COUNT_HEADER
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.exceptions import (
@@ -26,6 +27,9 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Pagination totals are exposed to the browser, which can only read
+        # headers listed here on a cross-origin response.
+        expose_headers=[TOTAL_COUNT_HEADER],
     )
     application.add_exception_handler(HTTPException, http_exception_handler)
     application.add_exception_handler(

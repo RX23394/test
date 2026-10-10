@@ -1,7 +1,13 @@
 """Authenticated conversation lifecycle endpoints."""
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 
+from app.api.pagination import (
+    DEFAULT_PAGE_SIZE,
+    LimitQuery,
+    OffsetQuery,
+    set_total_count_header,
+)
 from app.auth.dependencies import CurrentUser, SessionDependency
 from app.repositories.conversation import ConversationRepository
 from app.schemas.conversation import (
@@ -34,9 +40,14 @@ def _not_found(error: ConversationNotFoundError) -> HTTPException:
 def list_conversations(
     current_user: CurrentUser,
     session: SessionDependency,
+    response: Response,
+    limit: LimitQuery = DEFAULT_PAGE_SIZE,
+    offset: OffsetQuery = 0,
 ) -> ResponseModel[list[ConversationResponse]]:
-    """List the current user's conversations newest first."""
-    conversations = _service(session).list(current_user.id)
+    """List one page of the current user's conversations, newest first."""
+    service = _service(session)
+    conversations = service.list(current_user.id, limit=limit, offset=offset)
+    set_total_count_header(response, service.count(current_user.id))
     return ResponseModel(
         status="ok",
         data=[ConversationResponse.model_validate(item) for item in conversations],
