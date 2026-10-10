@@ -9,7 +9,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 project_root = Path(__file__).resolve().parents[3]
 DEFAULT_JWT_SECRET_KEY = "development-only-change-me-at-least-32-bytes"
-PRODUCTION_ENVIRONMENTS = frozenset({"prod", "production"})
+PRODUCTION_ENVIRONMENTS = frozenset({"prod", "production", "staging"})
+DEVELOPMENT_ENVIRONMENTS = frozenset(
+    {"development", "dev", "local", "test", "testing", "ci"}
+)
+KNOWN_ENVIRONMENTS = PRODUCTION_ENVIRONMENTS | DEVELOPMENT_ENVIRONMENTS
 
 
 class Settings(BaseSettings):
@@ -44,7 +48,13 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_security(self) -> Self:
         """Reject unsafe authentication defaults in production."""
-        if self.app_env.strip().lower() not in PRODUCTION_ENVIRONMENTS:
+        environment = self.app_env.strip().lower()
+        if environment not in KNOWN_ENVIRONMENTS:
+            raise ValueError(
+                f"APP_ENV={self.app_env!r} is not recognised; use one of "
+                f"{', '.join(sorted(KNOWN_ENVIRONMENTS))}"
+            )
+        if environment not in PRODUCTION_ENVIRONMENTS:
             return self
         if (
             self.jwt_secret_key == DEFAULT_JWT_SECRET_KEY
@@ -56,6 +66,8 @@ class Settings(BaseSettings):
             )
         if not self.auth_cookie_secure:
             raise ValueError("AUTH_COOKIE_SECURE must be true in production")
+        if self.app_debug:
+            raise ValueError("APP_DEBUG must be false in production")
         return self
 
 
