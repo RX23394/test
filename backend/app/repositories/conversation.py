@@ -3,7 +3,6 @@
 from collections.abc import Sequence
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.conversation import Conversation
@@ -18,15 +17,10 @@ class ConversationRepository:
         self._session = session
 
     def create(self, *, user_id: int, title: str | None = None) -> Conversation:
-        """Create and persist a conversation."""
+        """Create a conversation inside the caller's transaction."""
         conversation = Conversation(user_id=user_id, title=title)
         self._session.add(conversation)
-        try:
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
-        self._session.refresh(conversation)
+        self._session.flush()
         return conversation
 
     def get_for_user(
@@ -68,14 +62,9 @@ class ConversationRepository:
         return int(self._session.scalar(statement) or 0)
 
     def rename(self, conversation: Conversation, title: str) -> Conversation:
-        """Persist a new title for a conversation."""
+        """Rename a conversation inside the caller's transaction."""
         conversation.title = title
-        try:
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
-        self._session.refresh(conversation)
+        self._session.flush()
         return conversation
 
     def add_exchange(
@@ -85,7 +74,7 @@ class ConversationRepository:
         question: str,
         answer: str,
     ) -> tuple[Message, Message]:
-        """Persist one user and assistant message atomically."""
+        """Add one user and assistant message inside the caller's transaction."""
         user_message = Message(
             conversation_id=conversation_id,
             role=MessageRole.USER.value,
@@ -97,11 +86,7 @@ class ConversationRepository:
             content=answer,
         )
         self._session.add_all((user_message, assistant_message))
-        try:
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
+        self._session.flush()
         return user_message, assistant_message
 
     def add_message(
@@ -111,19 +96,14 @@ class ConversationRepository:
         role: MessageRole,
         content: str,
     ) -> Message:
-        """Create and persist one message in a conversation."""
+        """Create one message inside the caller's transaction."""
         message = Message(
             conversation_id=conversation_id,
             role=role.value,
             content=content,
         )
         self._session.add(message)
-        try:
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
-        self._session.refresh(message)
+        self._session.flush()
         return message
 
     def list_messages(self, conversation_id: int) -> Sequence[Message]:
@@ -156,13 +136,9 @@ class ConversationRepository:
         return list(reversed(self._session.scalars(statement).all()))
 
     def delete(self, conversation: Conversation) -> None:
-        """Delete a conversation and all of its messages atomically."""
-        try:
-            self._session.execute(
-                delete(Message).where(Message.conversation_id == conversation.id)
-            )
-            self._session.delete(conversation)
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
+        """Delete a conversation and its messages inside the caller's transaction."""
+        self._session.execute(
+            delete(Message).where(Message.conversation_id == conversation.id)
+        )
+        self._session.delete(conversation)
+        self._session.flush()

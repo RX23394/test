@@ -1,6 +1,7 @@
 """Shared backend test fixtures."""
 
 from collections.abc import AsyncIterator, Iterator
+from types import TracebackType
 
 import httpx
 import pytest
@@ -29,6 +30,29 @@ loaded_model_types = (
 )
 
 
+class CommittingSession(Session):
+    """Session whose context manager commits, mirroring the request boundary.
+
+    Production commits once per request in ``get_db``; repositories only flush.
+    A test block that drives repositories directly therefore has to persist its
+    work the same way a request would, instead of relying on each repository
+    call committing on its own.
+    """
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Commit a successful block before the session is closed."""
+        try:
+            if exc_type is None:
+                self.commit()
+        finally:
+            super().__exit__(exc_type, exc_value, traceback)
+
+
 @pytest.fixture
 def session_factory() -> Iterator[sessionmaker[Session]]:
     """Provide a session factory backed by an isolated in-memory database."""
@@ -44,6 +68,7 @@ def session_factory() -> Iterator[sessionmaker[Session]]:
         bind=engine,
         autoflush=False,
         expire_on_commit=False,
+        class_=CommittingSession,
     )
     yield factory
     Base.metadata.drop_all(engine)

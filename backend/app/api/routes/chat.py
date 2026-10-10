@@ -180,6 +180,9 @@ def persist_stream_exchange(
             question,
             answer,
         )
+        # This session is the exchange's transaction boundary: repositories only
+        # flush, so the write becomes visible here.
+        write_session.commit()
 
 
 def _persist_completed_answer(

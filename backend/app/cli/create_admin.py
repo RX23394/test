@@ -50,6 +50,8 @@ def main() -> None:
             password_hash=hash_password(user_data.password),
             is_admin=True,
         )
+        # The command owns its transaction: repositories only flush.
+        session.commit()
 
     logger.info("Administrator created: %s (id=%s)", user.username, user.id)
 

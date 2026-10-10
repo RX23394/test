@@ -15,6 +15,7 @@ from fastapi import (
     status,
 )
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.api.pagination import (
     DEFAULT_PAGE_SIZE,
@@ -48,7 +49,6 @@ from app.services.document_parser import (
 )
 from app.services.document_parser.dependencies import ParserRegistryDependency
 from app.services.indexing import (
-    DocumentIndexError,
     DocumentIndexingService,
     DocumentIndexOwnershipError,
     DocumentTextEmptyError,
@@ -57,6 +57,54 @@ from app.services.indexing_jobs import claim_indexing_job, run_indexing_job
 
 router = APIRouter(prefix="/api/admin/documents", tags=["admin-documents"])
 logger = logging.getLogger(__name__)
+
+
+def _persist_pipeline_failure(session: Session) -> None:
+    """Persist the terminal status the indexing pipeline just recorded.
+
+    The pipeline compensates a failed index by marking the document ``failed``.
+    Repositories only flush, and a request that ends in an error rolls its
+    transaction back, so that state would otherwise be lost and the document
+    would stay ``processing`` until the lease expires.
+    """
+    try:
+        session.commit()
+    except SQLAlchemyError:
+        session.rollback()
+        logger.exception("Failed to persist the document indexing failure status")
+
+
+def _index_error_response(error: Exception) -> HTTPException:
+    """Map an indexing pipeline failure to its stable client response."""
+    if isinstance(error, DocumentFileNotFoundError):
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document file not found",
+        )
+    if isinstance(error, UnsupportedParserError):
+        return HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Document type is not supported",
+        )
+    if isinstance(error, DocumentParseError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document could not be parsed",
+        )
+    if isinstance(error, DocumentTextEmptyError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document contains no extractable text; scanned files need OCR",
+        )
+    if isinstance(error, DocumentIndexOwnershipError):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document indexing ownership was lost",
+        )
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Document indexing service is unavailable",
+    )
 
 
 @router.get(
@@ -154,7 +202,10 @@ def delete_document(
         )
     # Mark the row first: if any cleanup step fails, the document stays visible
     # as pending_delete instead of vanishing while its vectors remain orphaned.
+    # This is the one place that needs its own commit, because the marker has to
+    # survive a crash that happens during the external cleanup below.
     repository.update_status(document, DocumentStatus.PENDING_DELETE)
+    session.commit()
     try:
         qdrant_repository.delete_document(document.id)
     except Exception as exc:
@@ -172,10 +223,10 @@ def delete_document(
     # delete on its own would leave a live document that can no longer be found
     # by keyword search if the row delete then failed.
     try:
-        FtsChunkRepository(session).delete_document(document.id, commit=False)
+        FtsChunkRepository(session).delete_document(document.id)
         source_path = get_settings().document_upload_dir / document.filename
         source_path.unlink(missing_ok=True)
-        repository.delete(document, commit=False)
+        repository.delete(document)
         session.commit()
     except (OSError, RuntimeError, SQLAlchemyError, ValueError) as exc:
         session.rollback()
@@ -273,6 +324,9 @@ def start_document_indexing(
             status_code=status.HTTP_409_CONFLICT,
             detail="Document indexing is already in progress",
         )
+    # Publish the claim before the job is handed to the background task, so the
+    # document reads as "processing" for other requests immediately.
+    session.commit()
 
     background_tasks.add_task(
         run_indexing_job,
@@ -328,6 +382,9 @@ def index_document(
             status_code=status.HTTP_409_CONFLICT,
             detail="Document indexing is already in progress",
         )
+    # Publish the claim before the pipeline runs: it keeps the row out of other
+    # claims while the request works, and the lease reaper can recover it.
+    session.commit()
 
     service = DocumentIndexingService(
         document_repository=repository,
@@ -344,35 +401,8 @@ def index_document(
     )
     try:
         result = service.index(claimed_document, job_id)
-    except DocumentFileNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document file not found",
-        ) from exc
-    except UnsupportedParserError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Document type is not supported",
-        ) from exc
-    except DocumentParseError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Document could not be parsed",
-        ) from exc
-    except DocumentTextEmptyError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Document contains no extractable text; scanned files need OCR",
-        ) from exc
-    except DocumentIndexOwnershipError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Document indexing ownership was lost",
-        ) from exc
-    except (DocumentIndexError, OSError, RuntimeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Document indexing service is unavailable",
-        ) from exc
+    except Exception as exc:
+        _persist_pipeline_failure(session)
+        raise _index_error_response(exc) from exc
 
     return ResponseModel(status="ok", data=result)

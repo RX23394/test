@@ -13,6 +13,7 @@ suite can replace.
 import logging
 from uuid import uuid4
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
@@ -85,3 +86,16 @@ def run_indexing_job(
                 "Background indexing failed",
                 extra={"document_id": document_id},
             )
+        finally:
+            # This session is the job's transaction boundary: the completion or
+            # failure status written by the pipeline becomes visible here, and a
+            # transaction that cannot commit is rolled back so the lease reaper
+            # can recover the document.
+            try:
+                session.commit()
+            except SQLAlchemyError:
+                session.rollback()
+                logger.exception(
+                    "Background indexing status could not be committed",
+                    extra={"document_id": document_id},
+                )

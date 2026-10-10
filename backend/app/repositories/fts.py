@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.schema import DOCUMENT_CHUNKS_FTS_TABLE
@@ -45,40 +44,35 @@ class FtsChunkRepository:
         chunks: Sequence[Chunk],
     ) -> None:
         """Replace every FTS5 row belonging to a document."""
-        try:
+        self._session.execute(
+            text(f"DELETE FROM {FTS_TABLE_NAME} WHERE document_id = :document_id"),
+            {"document_id": document.id},
+        )
+        rows: list[dict[str, str | int | None]] = [
+            {
+                "document_id": document.id,
+                "chunk_index": chunk.chunk_index,
+                "content": chunk.content,
+                "page": chunk.page,
+                "section": chunk.section,
+                "content_tokens": self._tokenizer.tokenize_for_index(chunk.content),
+            }
+            for chunk in chunks
+        ]
+        if rows:
             self._session.execute(
-                text(f"DELETE FROM {FTS_TABLE_NAME} WHERE document_id = :document_id"),
-                {"document_id": document.id},
+                text(
+                    f"""
+                    INSERT INTO {FTS_TABLE_NAME}
+                        (document_id, chunk_index, content, page, section,
+                         content_tokens)
+                    VALUES
+                        (:document_id, :chunk_index, :content, :page, :section,
+                         :content_tokens)
+                    """
+                ),
+                rows,
             )
-            rows: list[dict[str, str | int | None]] = [
-                {
-                    "document_id": document.id,
-                    "chunk_index": chunk.chunk_index,
-                    "content": chunk.content,
-                    "page": chunk.page,
-                    "section": chunk.section,
-                    "content_tokens": self._tokenizer.tokenize_for_index(chunk.content),
-                }
-                for chunk in chunks
-            ]
-            if rows:
-                self._session.execute(
-                    text(
-                        f"""
-                        INSERT INTO {FTS_TABLE_NAME}
-                            (document_id, chunk_index, content, page, section,
-                             content_tokens)
-                        VALUES
-                            (:document_id, :chunk_index, :content, :page, :section,
-                             :content_tokens)
-                        """
-                    ),
-                    rows,
-                )
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
 
     def list_stored_chunks(self) -> list[StoredChunkRow]:
         """Return every indexed chunk, ordered for a deterministic rebuild."""
@@ -102,28 +96,16 @@ class FtsChunkRepository:
             for row in rows
         ]
 
-    def delete_document(self, document_id: int, *, commit: bool = True) -> None:
+    def delete_document(self, document_id: int) -> None:
         """Delete all full-text chunks belonging to one document.
 
-        ``commit=False`` leaves the transaction to the caller, which is what lets
-        a multi-store flow commit the index cleanup and the row deletion
-        together instead of one after the other.
+        The delete stays inside the caller's transaction, which is what lets a
+        multi-store flow commit index cleanup and row deletion together.
         """
-        try:
-            self._session.execute(
-                text(
-                    f"DELETE FROM {FTS_TABLE_NAME} " "WHERE document_id = :document_id"
-                ),
-                {"document_id": document_id},
-            )
-            if commit:
-                self._session.commit()
-            else:
-                self._session.flush()
-        except SQLAlchemyError:
-            if commit:
-                self._session.rollback()
-            raise
+        self._session.execute(
+            text(f"DELETE FROM {FTS_TABLE_NAME} WHERE document_id = :document_id"),
+            {"document_id": document_id},
+        )
 
     def search(self, query: str, limit: int) -> list[RetrievalCandidate]:
         """Return BM25-ranked FTS5 matches up to the requested limit."""

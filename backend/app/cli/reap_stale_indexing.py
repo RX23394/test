@@ -55,6 +55,8 @@ def main() -> None:
             released = DocumentRepository(session).release_all_expired_leases(
                 lease_seconds
             )
+            # The command owns its transaction: repositories only flush.
+            session.commit()
         except Exception:
             session.rollback()
             logger.exception("Stale indexing lease sweep failed")

@@ -46,9 +46,20 @@ def enable_sqlite_foreign_keys(
 
 
 def get_db() -> Generator[Session, None, None]:
-    """Yield a database session and close it after the request."""
+    """Yield a session and make the request its transaction boundary.
+
+    Repositories only flush, so this is the single place that decides whether a
+    request's writes become visible: they commit together, or every one of them
+    is rolled back. Services that need an intermediate commit (for example the
+    deletion intent marker) call ``session.commit()`` themselves.
+    """
     with SessionFactory() as session:
-        yield session
+        try:
+            yield session
+        except Exception:
+            session.rollback()
+            raise
+        session.commit()
 
 
 def get_session_factory() -> sessionmaker[Session]:

@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Select, Update, func, or_, select, update
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentStatus
@@ -97,7 +96,7 @@ class DocumentRepository:
         uploader_id: int,
         status: DocumentStatus = DocumentStatus.PENDING,
     ) -> Document:
-        """Create and persist a document."""
+        """Create a document inside the caller's transaction."""
         document = Document(
             filename=filename,
             original_filename=original_filename,
@@ -107,32 +106,13 @@ class DocumentRepository:
             status=status,
         )
         self._session.add(document)
-        try:
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
-        self._session.refresh(document)
+        self._session.flush()
         return document
 
-    def update_status(
-        self,
-        document: Document,
-        status: DocumentStatus,
-        *,
-        commit: bool = True,
-    ) -> Document:
-        """Update a status immediately or within the caller's transaction."""
+    def update_status(self, document: Document, status: DocumentStatus) -> Document:
+        """Update a document status inside the caller's transaction."""
         document.status = status
-        try:
-            if commit:
-                self._session.commit()
-                self._session.refresh(document)
-            else:
-                self._session.flush()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
+        self._session.flush()
         return document
 
     def claim_for_indexing(self, document_id: int, job_id: str) -> Document | None:
@@ -149,12 +129,7 @@ class DocumentRepository:
                 indexing_started_at=func.now(),
             )
         )
-        try:
-            result = self._session.execute(statement)
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
+        result = self._session.execute(statement)
         if result.rowcount != 1:
             return None
         self._session.expire_all()
@@ -196,12 +171,7 @@ class DocumentRepository:
 
     def _execute_lease_release(self, statement: Update) -> int:
         """Execute a lease release update and return the affected row count."""
-        try:
-            result = self._session.execute(statement)
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
+        result = self._session.execute(statement)
         self._session.expire_all()
         return int(result.rowcount or 0)
 
@@ -250,23 +220,10 @@ class DocumentRepository:
                 indexing_started_at=None,
             )
         )
-        try:
-            result = self._session.execute(statement)
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
+        result = self._session.execute(statement)
         return result.rowcount == 1
 
-    def delete(self, document: Document, *, commit: bool = True) -> None:
-        """Delete a document, optionally inside the caller's transaction."""
+    def delete(self, document: Document) -> None:
+        """Delete a document inside the caller's transaction."""
         self._session.delete(document)
-        try:
-            if commit:
-                self._session.commit()
-            else:
-                self._session.flush()
-        except SQLAlchemyError:
-            if commit:
-                self._session.rollback()
-            raise
+        self._session.flush()

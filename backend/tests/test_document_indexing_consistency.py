@@ -46,15 +46,8 @@ class FakeDocumentRepository:
         self.owner_job_id = ""
         return True
 
-    def update_status(
-        self,
-        document: Document,
-        status: DocumentStatus,
-        *,
-        commit: bool = True,
-    ) -> Document:
-        """Retain the legacy helper for detached document test setup."""
-        del commit
+    def update_status(self, document: Document, status: DocumentStatus) -> Document:
+        """Record a status update for detached document test setup."""
         self.statuses.append(status)
         document.status = status
         return document

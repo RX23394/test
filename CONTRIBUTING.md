@@ -124,7 +124,22 @@ CI 会重复执行以上全部内容，外加 `docker compose config` 校验。*
   python -m app.cli.rebuild_search_index
   ```
 
-## 6. PR 流程
+## 6. 事务与仓储规则
+
+**仓储只 `flush()`，不 `commit()`。** 一次请求就是一个事务：`app/db/session.py` 的
+`get_db` 在请求成功时提交、抛异常时回滚。因此：
+
+- 新增仓储写方法时用 `self._session.flush()`（需要主键或默认值时也用 flush，不要用
+  commit + refresh）；
+- 需要「中途落库」的流程由调用方显式 `session.commit()`，并在注释里说明为什么必须
+  单独提交（例如文档删除要先提交 `pending_delete` 标记，这样外部清理阶段崩溃后仍能
+  看到意图）；
+- 请求之外的写入必须自持会话并显式提交，参考 `app/services/indexing_jobs.py`、
+  `routes/chat.py:persist_stream_exchange` 与 `app/cli/*`；
+- 测试用 conftest 的 `session_factory`：它的会话在块正常结束时提交，等价于一次请求，
+  所以不要依赖「调用仓储即落库」。
+
+## 7. PR 流程
 
 1. 推送分支：`git push -u origin feat/fts-chinese-tokenizer`
 2. 按 `.github/PULL_REQUEST_TEMPLATE.md` 填写（涉及迁移时必须填迁移检查项）
@@ -138,7 +153,7 @@ CI 会重复执行以上全部内容，外加 `docker compose config` 校验。*
    git branch -d feat/fts-chinese-tokenizer
    ```
 
-## 7. 当前仓库状态说明
+## 8. 当前仓库状态说明
 
 本仓库此前**从未提交过**，`main` 的第一个提交是当前工作树的完整快照。以下本地
 文件被 `.gitignore` 排除，不进入版本控制：
