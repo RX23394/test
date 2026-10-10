@@ -94,11 +94,14 @@ npm run dev
 
 ## Docker Compose
 
-完整环境包含前端、后端和 Qdrant。启动前必须设置随机 JWT 密钥：
+完整环境包含前端、后端和 Qdrant。Compose 默认以**生产模式**启动后端，因此必须显式
+提供随机 JWT 密钥与 Qdrant API Key；本地明文 HTTP 访问还需要显式声明开发环境：
 
 ```powershell
 $env:JWT_SECRET_KEY = "使用密码生成器创建的至少32字节随机字符串"
+$env:QDRANT_API_KEY = "另一个随机字符串"
 $env:OPENAI_API_KEY = "你的API密钥"
+$env:APP_ENV = "development"   # 本地明文 HTTP；HTTPS 部署请留空并设 AUTH_COOKIE_SECURE=true
 docker compose up --build
 ```
 
@@ -108,7 +111,15 @@ docker compose up --build
 docker compose exec backend python -m app.cli.create_admin
 ```
 
-生产环境部署在 HTTPS 后面时，应在 Compose 或部署平台中同时设置 `APP_ENV=production` 和 `AUTH_COOKIE_SECURE=true`，并妥善保管 `JWT_SECRET_KEY`、`OPENAI_API_KEY` 和 `QDRANT_API_KEY`。生产模式会拒绝默认或短于 32 字节的 JWT 密钥，并拒绝不安全的认证 Cookie。
+生产模式（`APP_ENV=production`，默认值）会拒绝默认或短于 32 字节的 JWT 密钥、
+`AUTH_COOKIE_SECURE=false` 和 `APP_DEBUG=true`，所以放到 HTTPS 后面时只需设置
+`AUTH_COOKIE_SECURE=true` 并妥善保管 `JWT_SECRET_KEY`、`QDRANT_API_KEY` 和
+`OPENAI_API_KEY`。
+
+后端容器以 uid 10001 的非 root 用户运行；Qdrant 只在 Compose 内部网络暴露，不再
+发布到宿主端口，且必须携带 API Key。若沿用旧的 `app_data`/`qdrant_data` 卷，卷内
+文件属主仍是 root，需要重建（`docker compose down -v`，会删除数据）或在卷内修正
+属主后再启动。
 
 ## 主要环境变量
 
@@ -118,14 +129,25 @@ docker compose exec backend python -m app.cli.create_admin
 | `DOCUMENT_UPLOAD_DIR` | `data/uploads` | 上传文件存储目录 |
 | `DOCUMENT_MAX_UPLOAD_BYTES` | `52428800` | 单文件上限，默认 50 MB |
 | `QDRANT_URL` | `http://127.0.0.1:6333` | Qdrant 服务地址 |
-| `QDRANT_API_KEY` | 空 | Qdrant API 密钥 |
+| `QDRANT_API_KEY` | 空（Compose 必填） | Qdrant API 密钥 |
 | `QDRANT_COLLECTION_NAME` | `document_chunks` | 向量集合名称 |
+| `RETRIEVAL_MIN_SCORE` | `0.87` | 向量相关度下限，低于它的候选不进入 prompt |
+| `CHAT_HISTORY_TURNS` | `3` | 拼入检索查询的最近用户提问轮数 |
+| `CHAT_HISTORY_MAX_TOKENS` | `512` | 回放对话历史的 token 预算 |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI 兼容接口地址 |
 | `OPENAI_API_KEY` | `not-required` | LLM API 密钥 |
 | `OPENAI_MODEL` | `gpt-4o-mini` | 对话模型名称 |
+| `OPENAI_TEMPERATURE` | `0` | 采样温度，0 表示可复现输出 |
+| `OPENAI_MAX_TOKENS` | `1024` | 单次回答长度上限 |
+| `INDEXING_LEASE_SECONDS` | `900` | 索引租约，超时后文档可被重新索引 |
+| `LOGIN_MAX_ATTEMPTS` / `LOGIN_WINDOW_SECONDS` | `5` / `300` | 登录限流（按客户端+用户名） |
+| `CHAT_MAX_REQUESTS` / `CHAT_WINDOW_SECONDS` | `30` / `60` | 聊天接口限流（按用户） |
 | `FRONTEND_ORIGIN` | `http://127.0.0.1:5173` | CORS 允许的前端来源 |
 | `JWT_SECRET_KEY` | 仅开发默认值 | JWT 签名密钥，生产环境必须替换 |
 | `AUTH_COOKIE_SECURE` | `false` | HTTPS 部署时必须设为 `true` |
+
+限流是**进程内**实现（线程安全的滑动窗口），单进程部署足够；多 worker 或水平扩容
+时必须换成共享存储（Redis）或在前置网关上做限流。
 
 ## 质量检查
 
@@ -174,6 +196,30 @@ python -m app.cli.rebuild_search_index
 关键词检索使用 jieba 分词以支持中文。SQLite 内置的 `unicode61` 分词器会把连续
 中文当作单个词元，导致中文查询命中率为 0，因此索引期与查询期统一通过
 `app/services/tokenization.py` 切词，并剔除停用词与纯标点。
+
+## 运维要点
+
+**切块尺寸变更后需要重新索引。** 当前默认目标是 320 cl100k token、重叠 48、硬上限
+400（历史版本是 500/80）。已索引文档的切块不会自动重切，`rebuild_search_index`
+也只重新分词、不重新解析，所以要让旧文档用上新尺寸，需要在管理界面对它们重新执行
+索引（解析 → 切块 → Embedding → 写入两个存储）。
+
+**卡住的索引任务会自动回收。** 索引任务带租约（`INDEXING_LEASE_SECONDS`，默认 15
+分钟）：worker 崩溃后文档不会永久停在“处理中”，重新点击索引会先释放过期租约再
+claim；也可以用命令做全库清扫：
+
+```powershell
+cd backend
+python -m app.cli.reap_stale_indexing
+python -m app.cli.reap_stale_indexing --lease-seconds 300
+```
+
+**删除是可重试的。** 删除文档时先把状态置为 `pending_delete`，再依次清理 Qdrant、
+FTS5 与源文件，最后才删行。任一步失败都会返回 503 并保留该状态，向量服务恢复后
+重复删除同一文档即可完成，不会留下孤儿向量。
+
+**登出会立即吊销已有 token。** `users.token_version` 随登出递增，JWT 携带 `ver`
+声明，版本不匹配的 token 一律 401。新增改密接口时同样需要递增该版本。
 
 ## 目录
 
