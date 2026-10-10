@@ -197,6 +197,11 @@ python -m app.cli.rebuild_search_index
 中文当作单个词元，导致中文查询命中率为 0，因此索引期与查询期统一通过
 `app/services/tokenization.py` 切词，并剔除停用词与纯标点。
 
+索引本身是 FTS5 的 **external-content 表**：切块正文与元数据存放在普通表
+`document_chunk_rows`（`document_id` 上有索引），虚拟表只保存词元流，两者由触发器
+保持同步。因此按文档清理切块走索引查找，不再是虚拟表全表扫描；删除文档时外键级联
+也会经由触发器同步删除索引项。
+
 ## 运维要点
 
 **切块尺寸变更后需要重新索引。** 当前默认目标是 320 cl100k token、重叠 48、硬上限

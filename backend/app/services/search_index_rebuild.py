@@ -2,16 +2,20 @@
 
 Changing the tokenizer cannot be done in place: FTS5 tokenizes as rows are
 written, so existing rows keep the old segmentation until they are rewritten.
-The chunk text is preserved in the ``content`` column, so a rebuild only has to
-re-tokenize and reinsert. It never re-parses a source file and never calls the
-embedding model or the LLM, which keeps the operation free and fast.
+The chunk text is preserved in the content table, so a rebuild only has to
+re-tokenize it and let the FTS5 triggers reindex the rows. It never re-parses a
+source file and never calls the embedding model or the LLM, which keeps the
+operation free and fast.
 """
 
 import logging
 
 from sqlalchemy import Connection, text
 
-from app.db.schema import DOCUMENT_CHUNKS_FTS_TABLE
+from app.db.schema import (
+    DOCUMENT_CHUNK_ROWS_TABLE,
+    DOCUMENT_CHUNKS_FTS_TABLE,
+)
 from app.services.tokenization import TokenizationService, get_tokenization_service
 
 logger = logging.getLogger(__name__)
@@ -24,15 +28,15 @@ def rebuild_document_chunks_index(
     """Rewrite every stored chunk with its current tokenization.
 
     Returns the number of chunks rewritten. The function is idempotent and
-    transactional: it commits only after every row has been reinserted.
+    transactional: it commits only after every row has been rewritten.
     """
     resolved_tokenizer = tokenizer or get_tokenization_service()
     rows = list(
         connection.execute(
             text(
                 f"""
-                SELECT document_id, chunk_index, content, page, section
-                FROM {DOCUMENT_CHUNKS_FTS_TABLE}
+                SELECT id, content
+                FROM {DOCUMENT_CHUNK_ROWS_TABLE}
                 ORDER BY document_id, chunk_index
                 """
             )
@@ -44,30 +48,31 @@ def rebuild_document_chunks_index(
 
     payload = [
         {
-            "document_id": int(row["document_id"]),
-            "chunk_index": int(row["chunk_index"]),
-            "content": str(row["content"]),
-            "page": row["page"],
-            "section": row["section"],
+            "row_id": int(row["id"]),
             "content_tokens": resolved_tokenizer.tokenize_for_index(
                 str(row["content"])
             ),
         }
         for row in rows
     ]
-
-    connection.execute(text(f"DELETE FROM {DOCUMENT_CHUNKS_FTS_TABLE}"))
+    # The update trigger reindexes each rewritten row.
     connection.execute(
         text(
             f"""
-            INSERT INTO {DOCUMENT_CHUNKS_FTS_TABLE}
-                (document_id, chunk_index, content, page, section, content_tokens)
-            VALUES
-                (:document_id, :chunk_index, :content, :page, :section,
-                 :content_tokens)
+            UPDATE {DOCUMENT_CHUNK_ROWS_TABLE}
+            SET content_tokens = :content_tokens
+            WHERE id = :row_id
             """
         ),
         payload,
+    )
+    # Rebuild from the content table as a final consistency step, so an index
+    # that was already out of step is repaired too.
+    connection.execute(
+        text(
+            f"INSERT INTO {DOCUMENT_CHUNKS_FTS_TABLE}"
+            f"({DOCUMENT_CHUNKS_FTS_TABLE}) VALUES ('rebuild')"
+        )
     )
     logger.info("Search index rebuilt for %s chunks", len(payload))
     return len(payload)

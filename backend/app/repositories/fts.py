@@ -1,4 +1,10 @@
-"""SQLite FTS5 repository for document chunks."""
+"""SQLite FTS5 repository for document chunks.
+
+The search index is an external-content FTS5 table: chunks live in
+``document_chunk_rows`` and the virtual table only holds the token stream, kept
+in step by triggers. Document-scoped cleanup therefore deletes from an ordinary
+indexed table instead of scanning a virtual one.
+"""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -6,13 +12,17 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.db.schema import DOCUMENT_CHUNKS_FTS_TABLE
+from app.db.schema import (
+    DOCUMENT_CHUNK_ROWS_TABLE,
+    DOCUMENT_CHUNKS_FTS_TABLE,
+)
 from app.models.document import Document
 from app.schemas.chunk import Chunk
 from app.schemas.search import RetrievalCandidate
 from app.services.tokenization import TokenizationService, get_tokenization_service
 
 FTS_TABLE_NAME = DOCUMENT_CHUNKS_FTS_TABLE
+CHUNK_ROWS_TABLE_NAME = DOCUMENT_CHUNK_ROWS_TABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,9 +53,16 @@ class FtsChunkRepository:
         document: Document,
         chunks: Sequence[Chunk],
     ) -> None:
-        """Replace every FTS5 row belonging to a document."""
+        """Replace every stored chunk of a document and reindex it.
+
+        Deletes go through the indexed ``document_id`` column of the content
+        table; the triggers mirror both the delete and the insert into FTS5.
+        """
         self._session.execute(
-            text(f"DELETE FROM {FTS_TABLE_NAME} WHERE document_id = :document_id"),
+            text(
+                f"DELETE FROM {CHUNK_ROWS_TABLE_NAME} "
+                "WHERE document_id = :document_id"
+            ),
             {"document_id": document.id},
         )
         rows: list[dict[str, str | int | None]] = [
@@ -63,7 +80,7 @@ class FtsChunkRepository:
             self._session.execute(
                 text(
                     f"""
-                    INSERT INTO {FTS_TABLE_NAME}
+                    INSERT INTO {CHUNK_ROWS_TABLE_NAME}
                         (document_id, chunk_index, content, page, section,
                          content_tokens)
                     VALUES
@@ -80,7 +97,7 @@ class FtsChunkRepository:
             text(
                 f"""
                 SELECT document_id, chunk_index, content, page, section
-                FROM {FTS_TABLE_NAME}
+                FROM {CHUNK_ROWS_TABLE_NAME}
                 ORDER BY document_id, chunk_index
                 """
             )
@@ -97,13 +114,16 @@ class FtsChunkRepository:
         ]
 
     def delete_document(self, document_id: int) -> None:
-        """Delete all full-text chunks belonging to one document.
+        """Delete all stored chunks belonging to one document.
 
         The delete stays inside the caller's transaction, which is what lets a
         multi-store flow commit index cleanup and row deletion together.
         """
         self._session.execute(
-            text(f"DELETE FROM {FTS_TABLE_NAME} WHERE document_id = :document_id"),
+            text(
+                f"DELETE FROM {CHUNK_ROWS_TABLE_NAME} "
+                "WHERE document_id = :document_id"
+            ),
             {"document_id": document_id},
         )
 
@@ -115,13 +135,15 @@ class FtsChunkRepository:
         statement = text(
             f"""
             SELECT
-                document_id,
-                chunk_index,
-                content,
-                page,
-                section,
+                rows.document_id,
+                rows.chunk_index,
+                rows.content,
+                rows.page,
+                rows.section,
                 bm25({FTS_TABLE_NAME}) AS score
             FROM {FTS_TABLE_NAME}
+            JOIN {CHUNK_ROWS_TABLE_NAME} AS rows
+                ON rows.id = {FTS_TABLE_NAME}.rowid
             WHERE {FTS_TABLE_NAME} MATCH :match_query
             ORDER BY score
             LIMIT :limit

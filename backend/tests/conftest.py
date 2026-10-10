@@ -18,7 +18,7 @@ from app.core.rate_limit import (
     get_login_rate_limiter,
 )
 from app.db.base import Base
-from app.db.schema import current_document_chunks_fts_ddl
+from app.db.schema import current_search_index_ddl, drop_search_index_ddl
 from app.db.session import get_db, get_session_factory
 from app.main import app
 
@@ -63,7 +63,8 @@ def session_factory() -> Iterator[sessionmaker[Session]]:
     )
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
-        connection.exec_driver_sql(current_document_chunks_fts_ddl())
+        for statement in current_search_index_ddl():
+            connection.exec_driver_sql(statement)
     factory: sessionmaker[Session] = sessionmaker(
         bind=engine,
         autoflush=False,
@@ -71,6 +72,9 @@ def session_factory() -> Iterator[sessionmaker[Session]]:
         class_=CommittingSession,
     )
     yield factory
+    with engine.begin() as connection:
+        for statement in drop_search_index_ddl():
+            connection.exec_driver_sql(statement)
     Base.metadata.drop_all(engine)
     engine.dispose()
 

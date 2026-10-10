@@ -19,10 +19,15 @@ if config.config_file_name is not None:
 
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = Base.metadata
-# The search tables are FTS5 virtual tables. SQLAlchemy cannot represent them in
-# metadata, so they stay owned by the migrations that create them and are
-# excluded from autogenerate instead of being recreated as plain tables.
-FTS_TABLE_PREFIXES = ("document_chunks_fts", "chunk_index")
+# The search tables are FTS5 virtual tables plus their external content table.
+# SQLAlchemy cannot represent any of them in metadata, so they stay owned by the
+# migrations that create them and are excluded from autogenerate instead of being
+# recreated as plain tables (or dropped as unknown tables).
+FTS_TABLE_PREFIXES = (
+    "document_chunks_fts",
+    "document_chunk_rows",
+    "chunk_index",
+)
 
 
 def include_object(

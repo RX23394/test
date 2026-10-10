@@ -29,8 +29,10 @@ from alembic import command
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.schema import (
-    DOCUMENT_CHUNKS_FTS_COLUMNS,
+    DOCUMENT_CHUNK_ROW_COLUMNS,
+    DOCUMENT_CHUNK_ROWS_TABLE,
     DOCUMENT_CHUNKS_FTS_TABLE,
+    FTS_INDEXED_COLUMN,
 )
 from app.models.conversation import Conversation
 from app.models.document import Document, DocumentStatus
@@ -122,36 +124,72 @@ def test_migrated_schema_matches_orm_metadata(migrated_engine: Engine) -> None:
 def test_migrations_define_the_fts_table_the_application_queries(
     migrated_engine: Engine,
 ) -> None:
-    """The migrated database must expose the FTS columns the code reads."""
+    """The migrated database must expose the search columns the code reads."""
     with migrated_engine.connect() as connection:
-        chunks_columns = {
+        fts_columns = {
             row["name"]
             for row in connection.exec_driver_sql(
                 f"PRAGMA table_info({DOCUMENT_CHUNKS_FTS_TABLE})"
             ).mappings()
         }
+        row_columns = {
+            row["name"]
+            for row in connection.exec_driver_sql(
+                f"PRAGMA table_info({DOCUMENT_CHUNK_ROWS_TABLE})"
+            ).mappings()
+        }
 
-    assert chunks_columns == {name for name, _ in DOCUMENT_CHUNKS_FTS_COLUMNS}
+    assert fts_columns == {FTS_INDEXED_COLUMN}
+    assert row_columns == {"id", *DOCUMENT_CHUNK_ROW_COLUMNS}
 
 
 def test_search_index_can_be_queried_after_migrations(migrated_engine: Engine) -> None:
-    """The migrated search index answers MATCH queries, not just PRAGMA reads."""
+    """The migrated index answers MATCH queries through its content table.
+
+    Inserting into the content table is what the application does, so this also
+    proves the synchronisation triggers exist; deleting the owning document then
+    proves the cascade reaches the index.
+    """
     with migrated_engine.connect() as connection:
         connection.exec_driver_sql(
-            f"INSERT INTO {DOCUMENT_CHUNKS_FTS_TABLE} "
+            "INSERT INTO users "
+            "(id, username, password_hash, is_admin, is_active, token_version) "
+            "VALUES (1, 'contract-user', 'hash', 0, 1, 1)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO documents "
+            "(id, filename, original_filename, sha256, file_size, uploader_id, "
+            " status) VALUES (1, 'stored.md', 'guide.md', 'digest', 10, 1, 'pending')"
+        )
+        connection.exec_driver_sql(
+            f"INSERT INTO {DOCUMENT_CHUNK_ROWS_TABLE} "
             "(document_id, chunk_index, content, page, section, content_tokens) "
             "VALUES (1, 0, 'OSPF routing', 1, 'Routing', 'ospf routing')"
         )
         matched = (
             connection.exec_driver_sql(
-                f"SELECT content FROM {DOCUMENT_CHUNKS_FTS_TABLE} "
-                "WHERE document_chunks_fts MATCH 'ospf'"
+                f"SELECT rows.content FROM {DOCUMENT_CHUNKS_FTS_TABLE} "
+                f"JOIN {DOCUMENT_CHUNK_ROWS_TABLE} AS rows "
+                f"ON rows.id = {DOCUMENT_CHUNKS_FTS_TABLE}.rowid "
+                f"WHERE {DOCUMENT_CHUNKS_FTS_TABLE} MATCH 'ospf'"
+            )
+            .scalars()
+            .all()
+        )
+        connection.exec_driver_sql("DELETE FROM documents WHERE id = 1")
+        remaining = (
+            connection.exec_driver_sql(
+                f"SELECT rows.content FROM {DOCUMENT_CHUNKS_FTS_TABLE} "
+                f"JOIN {DOCUMENT_CHUNK_ROWS_TABLE} AS rows "
+                f"ON rows.id = {DOCUMENT_CHUNKS_FTS_TABLE}.rowid "
+                f"WHERE {DOCUMENT_CHUNKS_FTS_TABLE} MATCH 'ospf'"
             )
             .scalars()
             .all()
         )
 
     assert matched == ["OSPF routing"]
+    assert remaining == []
 
 
 def test_migrations_have_no_autogenerate_drift(tmp_path: Path) -> None:
