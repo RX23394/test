@@ -4,7 +4,12 @@ import pytest
 import tiktoken
 
 from app.models.chunk import Chunk
-from app.services.chunk import ChunkService
+from app.services.chunk import (
+    DEFAULT_OVERLAP_TOKENS,
+    DEFAULT_TARGET_TOKENS,
+    MAX_CHUNK_TOKENS,
+    ChunkService,
+)
 from app.services.document_parser import DocumentContent, DocumentPage
 
 
@@ -74,15 +79,16 @@ def test_chunk_service_uses_complete_word_overlap() -> None:
         assert len(encoding.encode(overlap_text)) >= 3
 
 
-def test_chunk_service_defaults_to_about_500_tokens_with_80_overlap() -> None:
-    """Default chunks target 500 tokens and overlap by complete words."""
+def test_chunk_service_defaults_to_about_320_tokens_with_48_overlap() -> None:
+    """Default chunks target 320 tokens and overlap by complete words."""
     encoding = tiktoken.get_encoding("cl100k_base")
     document = create_content(" ".join(f"token{index}" for index in range(500)))
 
     chunks = ChunkService().create_chunks(document)
 
     assert len(chunks) > 1
-    assert chunks[0].token_count == 500
+    assert all(chunk.token_count <= DEFAULT_TARGET_TOKENS for chunk in chunks)
+    assert chunks[0].token_count > DEFAULT_OVERLAP_TOKENS
     previous_words = chunks[0].text.split()
     current_words = chunks[1].text.split()
     overlap_size = 0
@@ -91,7 +97,36 @@ def test_chunk_service_defaults_to_about_500_tokens_with_80_overlap() -> None:
             overlap_size = size
     assert overlap_size > 0
     overlap_text = " ".join(current_words[:overlap_size])
-    assert len(encoding.encode(overlap_text)) >= 80
+    assert len(encoding.encode(overlap_text)) >= DEFAULT_OVERLAP_TOKENS
+
+
+def test_chunk_service_splits_a_long_unbroken_chinese_paragraph() -> None:
+    """A whitespace-free CJK paragraph stays inside the embedding limit."""
+    sentences = "配置BGP邻居关系时需要指定对端自治系统号。"
+    document = create_content(sentences * 200)
+
+    chunks = ChunkService().create_chunks(document)
+
+    assert len(chunks) > 1
+    assert all(0 < chunk.token_count <= MAX_CHUNK_TOKENS for chunk in chunks)
+    for sentence in {sentences}:
+        assert any(sentence in chunk.text for chunk in chunks)
+
+
+def test_chunk_service_hard_splits_a_single_oversized_sentence() -> None:
+    """One sentence without punctuation is split by token count, not dropped."""
+    document = create_content("配置BGP邻居关系时需要指定对端自治系统号" * 100)
+
+    chunks = ChunkService().create_chunks(document)
+
+    assert len(chunks) > 1
+    assert all(0 < chunk.token_count <= MAX_CHUNK_TOKENS for chunk in chunks)
+
+
+def test_chunk_service_rejects_a_hard_limit_below_the_target() -> None:
+    """A hard limit smaller than the target window is rejected."""
+    with pytest.raises(ValueError, match="max_chunk_tokens"):
+        ChunkService(target_tokens=100, overlap_tokens=10, max_chunk_tokens=50)
 
 
 def test_chunk_service_never_truncates_words() -> None:

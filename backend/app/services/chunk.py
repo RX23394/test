@@ -7,12 +7,17 @@ from app.models.chunk import Chunk
 from app.services.document_parser import DocumentContent, DocumentPage
 from app.services.token_counter import TokenCounter
 
-DEFAULT_TARGET_TOKENS = 500
-DEFAULT_OVERLAP_TOKENS = 80
+DEFAULT_TARGET_TOKENS = 320
+DEFAULT_OVERLAP_TOKENS = 48
 DEFAULT_ENCODING_NAME = "cl100k_base"
+# The embedding model truncates at 512 E5 tokens, and cl100k counts Chinese text
+# at roughly 20% fewer tokens than E5. A 400-token cl100k ceiling therefore keeps
+# every chunk inside the encoder window instead of dropping its tail silently.
+MAX_CHUNK_TOKENS = 400
 MARKDOWN_HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 WORD_PATTERN = re.compile(r"\s*\S+")
 PARAGRAPH_BREAK_PATTERN = re.compile(r"(?:\r?\n)[ \t]*(?:\r?\n)")
+SENTENCE_BOUNDARY_PATTERN = re.compile(r"(?<=[。！？；…!?;.])")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +46,7 @@ class ChunkService:
         target_tokens: int = DEFAULT_TARGET_TOKENS,
         overlap_tokens: int = DEFAULT_OVERLAP_TOKENS,
         encoding_name: str = DEFAULT_ENCODING_NAME,
+        max_chunk_tokens: int = MAX_CHUNK_TOKENS,
     ) -> None:
         """Initialize token targets, overlap, and tokenizer encoding."""
         if target_tokens <= 0:
@@ -49,9 +55,12 @@ class ChunkService:
             raise ValueError(
                 "overlap_tokens must be non-negative and less than target_tokens"
             )
+        if max_chunk_tokens < target_tokens:
+            raise ValueError("max_chunk_tokens must not be smaller than target_tokens")
 
         self._target_tokens = target_tokens
         self._overlap_tokens = overlap_tokens
+        self._max_chunk_tokens = max_chunk_tokens
         self._token_counter = TokenCounter(encoding_name)
 
     def create_chunks(self, document: DocumentContent) -> list[Chunk]:
@@ -150,15 +159,60 @@ class ChunkService:
         return chunks
 
     def _create_words(self, text: str) -> list[_Word]:
-        """Token-count complete words while retaining leading whitespace."""
-        return [
-            _Word(
-                text=match.group(),
-                token_count=self._token_counter.count(match.group()),
-                starts_paragraph=bool(PARAGRAPH_BREAK_PATTERN.search(match.group())),
-            )
-            for match in WORD_PATTERN.finditer(text)
-        ]
+        """Token-count complete words while retaining leading whitespace.
+
+        A whitespace-free run such as a Chinese paragraph or a long URL is split
+        at sentence boundaries, and then by token count, so no single word can
+        force a chunk past the embedding limit.
+        """
+        words: list[_Word] = []
+        for match in WORD_PATTERN.finditer(text):
+            for piece in self._split_oversized_word(match.group()):
+                words.append(
+                    _Word(
+                        text=piece,
+                        token_count=self._token_counter.count(piece),
+                        starts_paragraph=bool(PARAGRAPH_BREAK_PATTERN.search(piece)),
+                    )
+                )
+        return words
+
+    def _split_oversized_word(self, word: str) -> list[str]:
+        """Return one or more pieces that each fit the hard chunk limit."""
+        if self._token_counter.count(word) <= self._max_chunk_tokens:
+            return [word]
+
+        pieces: list[str] = []
+        for sentence in SENTENCE_BOUNDARY_PATTERN.split(word):
+            if not sentence:
+                continue
+            if self._token_counter.count(sentence) <= self._max_chunk_tokens:
+                pieces.append(sentence)
+            else:
+                pieces.extend(self._split_by_token_budget(sentence))
+        return pieces or [word]
+
+    def _split_by_token_budget(self, text: str) -> list[str]:
+        """Split text without punctuation into pieces within the hard limit."""
+        pieces: list[str] = []
+        start = 0
+        while start < len(text):
+            end = self._largest_fitting_prefix(text, start)
+            pieces.append(text[start:end])
+            start = end
+        return pieces
+
+    def _largest_fitting_prefix(self, text: str, start: int) -> int:
+        """Return the longest end offset whose piece fits the hard limit."""
+        low = start + 1
+        high = len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self._token_counter.count(text[start:middle]) <= self._max_chunk_tokens:
+                low = middle
+            else:
+                high = middle - 1
+        return low
 
     def _find_window_end(
         self,
