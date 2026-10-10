@@ -153,9 +153,13 @@ async function runIndexPipeline(document: DocumentRecord): Promise<void> {
     transientStatuses.value[document.id] = "Parsing";
     await documentStore.parse(document.id);
     transientStatuses.value[document.id] = "Indexing";
-    await documentStore.index(document.id);
+    // Indexing runs in the background now, so the row follows the polled state.
+    const finished = await documentStore.index(document.id);
+    if (!finished || finished.status === "failed") {
+      throw new Error("indexing did not complete");
+    }
     transientStatuses.value[document.id] = "Indexed";
-    document.status = "indexed";
+    document.status = finished.status;
     ElMessage.success(`${document.original_filename} 已完成索引`);
   } catch {
     transientStatuses.value[document.id] = "Failed";

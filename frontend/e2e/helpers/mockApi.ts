@@ -124,13 +124,21 @@ export async function installMockApi(page: Page): Promise<MockApiState> {
       });
       return;
     }
-    if (/^\/api\/admin\/documents\/\d+\/index$/.test(path)) {
+    if (/^\/api\/admin\/documents\/\d+\/index\/async$/.test(path)) {
       const document = state.documents[0];
       if (document) document.status = "indexed";
-      await fulfillJson(route, {
-        status: "ok",
-        data: { document_id: document?.id ?? 10, chunk_count: 1 },
-      });
+      await fulfillJson(
+        route,
+        {
+          status: "ok",
+          data: {
+            document_id: document?.id ?? 10,
+            job_id: "e2e-job",
+            status: "processing",
+          },
+        },
+        202,
+      );
       return;
     }
     if (path === "/api/admin/users") {

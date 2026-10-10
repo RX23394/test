@@ -4,15 +4,25 @@ import { defineStore } from "pinia";
 import {
   deleteDocument,
   getDocumentErrorMessage,
-  indexDocument,
   listDocuments,
   parseDocument,
+  startDocumentIndexing,
   uploadDocument,
   type DocumentContent,
   type DocumentRecord,
 } from "@/api/documents";
 
 export type { DocumentContent, DocumentRecord } from "@/api/documents";
+
+const INDEX_POLL_INTERVAL_MS = 1500;
+const INDEX_POLL_ATTEMPTS = 40;
+
+/** Wait for one polling interval while background indexing runs. */
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
 
 export const useDocumentStore = defineStore("document", () => {
   const documents = ref<DocumentRecord[]>([]);
@@ -43,9 +53,23 @@ export const useDocumentStore = defineStore("document", () => {
     return parseDocument(documentId);
   }
 
-  /** Build all search indexes for one document. */
-  async function index(documentId: number): Promise<void> {
-    await indexDocument(documentId);
+  /** Claim background indexing and poll until the document leaves processing.
+   *
+   * Returns the refreshed record, or undefined when indexing did not finish
+   * inside the polling window.
+   */
+  async function index(documentId: number): Promise<DocumentRecord | undefined> {
+    await startDocumentIndexing(documentId);
+    for (let attempt = 0; attempt < INDEX_POLL_ATTEMPTS; attempt += 1) {
+      const records = await listDocuments();
+      const record = records.find((item) => item.id === documentId);
+      if (record && record.status !== "processing") {
+        documents.value = records;
+        return record;
+      }
+      await delay(INDEX_POLL_INTERVAL_MS);
+    }
+    return undefined;
   }
 
   /** Delete one document and remove it from local state. */

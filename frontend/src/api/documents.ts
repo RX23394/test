@@ -30,6 +30,12 @@ export interface DocumentContent {
   }>;
 }
 
+export interface DocumentIndexJob {
+  document_id: number;
+  job_id: string;
+  status: "processing";
+}
+
 /** Fetch administrator-visible documents with optional server-side search. */
 export async function listDocuments(search = ""): Promise<DocumentRecord[]> {
   const response: AxiosResponse<ResponseModel<DocumentRecord[]>> =
@@ -67,11 +73,17 @@ export async function parseDocument(id: number): Promise<DocumentContent> {
   return requireData(response.data);
 }
 
-/** Build search indexes for a parsed document. */
-export async function indexDocument(id: number): Promise<void> {
-  await apiClient.post(`/api/admin/documents/${id}/index`, undefined, {
-    timeout: 300_000,
-  });
+/** Claim background indexing for a parsed document.
+ *
+ * The endpoint answers 202 with a job handle right away; the pipeline keeps
+ * running afterwards and reports progress through the document status.
+ */
+export async function startDocumentIndexing(
+  id: number,
+): Promise<DocumentIndexJob> {
+  const response: AxiosResponse<ResponseModel<DocumentIndexJob>> =
+    await apiClient.post(`/api/admin/documents/${id}/index/async`);
+  return requireData(response.data);
 }
 
 /** Permanently delete a document and all of its indexes. */

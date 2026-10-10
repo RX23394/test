@@ -21,9 +21,9 @@ vi.mock("@/api/conversations", () => ({
 vi.mock("@/api/documents", () => ({
   deleteDocument: vi.fn(),
   getDocumentErrorMessage: vi.fn(),
-  indexDocument: vi.fn(),
   listDocuments: vi.fn(),
   parseDocument: vi.fn(),
+  startDocumentIndexing: vi.fn(),
   uploadDocument: vi.fn(),
 }));
 vi.mock("@/api/users", () => ({
@@ -76,6 +76,31 @@ describe("domain Pinia stores", () => {
 
     await store.remove(document.id);
     expect(store.documents).toEqual([]);
+  });
+
+  it("documentStore polls until background indexing finishes", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(documentApi.startDocumentIndexing).mockResolvedValue({
+        document_id: document.id,
+        job_id: "job-1",
+        status: "processing",
+      });
+      vi.mocked(documentApi.listDocuments)
+        .mockResolvedValueOnce([{ ...document, status: "processing" }])
+        .mockResolvedValueOnce([{ ...document, status: "indexed" }]);
+      const store = useDocumentStore();
+
+      const pending = store.index(document.id);
+      await vi.advanceTimersByTimeAsync(2000);
+      const finished = await pending;
+
+      expect(documentApi.startDocumentIndexing).toHaveBeenCalledWith(document.id);
+      expect(finished?.status).toBe("indexed");
+      expect(store.documents[0].status).toBe("indexed");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("adminStore owns users, status, and role updates", async () => {

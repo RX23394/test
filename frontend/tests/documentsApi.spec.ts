@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import apiClient from "@/api/api";
 import {
   deleteDocument,
-  indexDocument,
   listDocuments,
   parseDocument,
+  startDocumentIndexing,
   uploadDocument,
   type DocumentRecord,
 } from "@/api/documents";
@@ -64,7 +64,7 @@ describe("documents API", () => {
     expect(onProgress).toHaveBeenCalledWith(50);
   });
 
-  it("calls parse, index, and delete endpoints", async () => {
+  it("calls parse, background index, and delete endpoints", async () => {
     vi.mocked(apiClient.post).mockResolvedValue({
       data: {
         status: "ok",
@@ -74,7 +74,6 @@ describe("documents API", () => {
     vi.mocked(apiClient.delete).mockResolvedValue({ data: { status: "ok" } });
 
     await parseDocument(7);
-    await indexDocument(7);
     await deleteDocument(7);
 
     expect(apiClient.post).toHaveBeenCalledWith(
@@ -82,11 +81,25 @@ describe("documents API", () => {
       undefined,
       expect.any(Object),
     );
-    expect(apiClient.post).toHaveBeenCalledWith(
-      "/api/admin/documents/7/index",
-      undefined,
-      expect.any(Object),
-    );
     expect(apiClient.delete).toHaveBeenCalledWith("/api/admin/documents/7");
+  });
+
+  it("claims background indexing and returns the job handle", async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({
+      data: {
+        status: "ok",
+        data: { document_id: 7, job_id: "job-1", status: "processing" },
+      },
+    });
+
+    await expect(startDocumentIndexing(7)).resolves.toEqual({
+      document_id: 7,
+      job_id: "job-1",
+      status: "processing",
+    });
+
+    expect(apiClient.post).toHaveBeenCalledWith(
+      "/api/admin/documents/7/index/async",
+    );
   });
 });
