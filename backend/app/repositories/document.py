@@ -1,12 +1,22 @@
 """Document repository."""
 
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import Update, func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentStatus
+
+
+def _lease_deadline(lease_seconds: int) -> datetime:
+    """Return the naive UTC instant before which a lease counts as expired.
+
+    SQLite stores ``CURRENT_TIMESTAMP`` without a timezone, so the comparison
+    value is built the same way to keep the comparison a plain string ordering.
+    """
+    return datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=lease_seconds)
 
 
 class DocumentRepository:
@@ -119,6 +129,7 @@ class DocumentRepository:
             .values(
                 status=DocumentStatus.PROCESSING,
                 indexing_job_id=job_id,
+                indexing_started_at=func.now(),
             )
         )
         try:
@@ -131,6 +142,51 @@ class DocumentRepository:
             return None
         self._session.expire_all()
         return self._session.get(Document, document_id)
+
+    def release_expired_lease(self, document_id: int, lease_seconds: int) -> bool:
+        """Reset one expired processing lease so the document can be retried."""
+        released = self._expired_lease_update(lease_seconds).where(
+            Document.id == document_id
+        )
+        return self._execute_lease_release(released) > 0
+
+    def release_all_expired_leases(self, lease_seconds: int) -> int:
+        """Reset every expired processing lease and return how many were reset."""
+        return self._execute_lease_release(self._expired_lease_update(lease_seconds))
+
+    def _expired_lease_update(self, lease_seconds: int) -> Update:
+        """Build the update that fails documents whose indexing lease expired.
+
+        A ``PROCESSING`` row without a lease timestamp predates this feature (or
+        was left by an interrupted claim), so it is treated as expired too.
+        """
+        deadline = _lease_deadline(lease_seconds)
+        return (
+            update(Document)
+            .where(
+                Document.status == DocumentStatus.PROCESSING,
+                or_(
+                    Document.indexing_started_at.is_(None),
+                    Document.indexing_started_at < deadline,
+                ),
+            )
+            .values(
+                status=DocumentStatus.FAILED,
+                indexing_job_id=None,
+                indexing_started_at=None,
+            )
+        )
+
+    def _execute_lease_release(self, statement: Update) -> int:
+        """Execute a lease release update and return the affected row count."""
+        try:
+            result = self._session.execute(statement)
+            self._session.commit()
+        except SQLAlchemyError:
+            self._session.rollback()
+            raise
+        self._session.expire_all()
+        return int(result.rowcount or 0)
 
     def is_indexing_owner(self, document_id: int, job_id: str) -> bool:
         """Return whether a job still owns a document indexing task."""
@@ -171,7 +227,11 @@ class DocumentRepository:
                 Document.status == DocumentStatus.PROCESSING,
                 Document.indexing_job_id == job_id,
             )
-            .values(status=status, indexing_job_id=None)
+            .values(
+                status=status,
+                indexing_job_id=None,
+                indexing_started_at=None,
+            )
         )
         try:
             result = self._session.execute(statement)

@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
 
@@ -66,6 +67,15 @@ class BlockingEmbeddingService:
         assert texts == ["owned document content"]
         self.entered.set()
         assert self.release.wait(timeout=5)
+        return [[1.0, 0.0, 0.0]]
+
+
+class FixedEmbeddingService:
+    """Return one deterministic vector without blocking."""
+
+    def embed_passages(self, texts: Sequence[str]) -> list[list[float]]:
+        """Return one vector for the single test chunk."""
+        assert texts == ["owned document content"]
         return [[1.0, 0.0, 0.0]]
 
 
@@ -166,6 +176,53 @@ async def test_concurrent_index_requests_allow_only_the_claim_owner(
         assert stored_document is not None
         assert stored_document.status is DocumentStatus.INDEXED
         assert stored_document.indexing_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_expired_indexing_lease_can_be_claimed_again(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document abandoned by a dead worker is indexable again."""
+    settings: Settings = get_settings()
+    monkeypatch.setattr(settings, "document_upload_dir", tmp_path)
+    monkeypatch.setattr(document_routes, "ChunkService", OneChunkService)
+    vector_repository = RecordingVectorRepository()
+
+    def parser_registry() -> ParserRegistry:
+        """Return the deterministic Markdown parser."""
+        registry = ParserRegistry()
+        registry.register(".md", MarkdownParser())
+        return registry
+
+    app.dependency_overrides[get_embedding_service] = FixedEmbeddingService
+    app.dependency_overrides[get_qdrant_repository] = lambda: vector_repository
+    app.dependency_overrides[get_parser_registry] = parser_registry
+
+    with session_factory() as session:
+        document, admin_id = create_pending_document(session, tmp_path)
+        document_id = document.id
+        repository = DocumentRepository(session)
+        abandoned = repository.claim_for_indexing(document_id, "dead-worker")
+        assert abandoned is not None
+        abandoned.indexing_started_at = datetime.now(UTC).replace(
+            tzinfo=None
+        ) - timedelta(minutes=30)
+        session.commit()
+    client.cookies.set(settings.auth_cookie_name, create_access_token(admin_id))
+
+    response = await client.post(f"/api/admin/documents/{document_id}/index")
+
+    assert response.status_code == 200
+    assert vector_repository.replaced_document_ids == [document_id]
+    with session_factory() as session:
+        stored_document = DocumentRepository(session).get_by_id(document_id)
+        assert stored_document is not None
+        assert stored_document.status is DocumentStatus.INDEXED
+        assert stored_document.indexing_job_id is None
+        assert stored_document.indexing_started_at is None
 
 
 def test_repository_requires_the_claim_owner_to_finish_or_fail(

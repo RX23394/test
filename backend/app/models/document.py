@@ -56,6 +56,12 @@ class Document(Base):
         nullable=False,
     )
     indexing_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Lease start of the active indexing job. A process that dies mid-index would
+    # otherwise leave the document in PROCESSING forever with no way to retry.
+    indexing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

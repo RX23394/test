@@ -238,6 +238,9 @@ def index_document(
         )
 
     settings = get_settings()
+    # A worker that died mid-index must not block a retry forever: an expired
+    # lease is released before the new claim is attempted.
+    repository.release_expired_lease(document_id, settings.indexing_lease_seconds)
     job_id = str(uuid4())
     claimed_document = repository.claim_for_indexing(document_id, job_id)
     if claimed_document is None:

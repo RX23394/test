@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     # turns are replayed to the model within a token budget.
     chat_history_turns: int = Field(default=3, ge=0, le=20)
     chat_history_max_tokens: int = Field(default=512, ge=0)
+    # An indexing job that stopped without finalizing its status keeps the
+    # document in "processing" forever; after this lease it can be retried.
+    indexing_lease_seconds: int = Field(default=900, ge=60)
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Self:
