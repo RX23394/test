@@ -14,6 +14,7 @@ type DisplayStatus =
   | "Parsing"
   | "Indexing"
   | "Indexed"
+  | "Deleting"
   | "Failed";
 
 interface UploadingRow {
@@ -274,6 +275,7 @@ function displayStatus(document: DocumentRecord): DisplayStatus {
     processing: "Parsing",
     completed: "Indexing",
     indexed: "Indexed",
+    pending_delete: "Deleting",
     failed: "Failed",
   };
   return statusMap[document.status];
@@ -519,6 +521,7 @@ td { padding: 15px 20px; border-top: 1px solid #f0f2f5; color: #536174; font-siz
 .status-uploading, .status-parsing, .status-indexing { color: #2563eb; background: #eff6ff; }
 .status-parsing i, .status-indexing i { animation: pulse 1.2s infinite; }
 .status-indexed { color: #15803d; background: #ecfdf3; }
+.status-deleting { color: #b45309; background: #fffbeb; }
 .status-failed { color: #dc2626; background: #fef2f2; }
 .row-actions { display: flex; white-space: nowrap; }
 .muted { color: #9aa6b6; }

@@ -1,10 +1,13 @@
 """Resolve retrieval labels to database-backed source metadata."""
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.repositories.document import DocumentRepository
 from app.schemas.search import SearchResult
+
+logger = logging.getLogger(__name__)
 
 CITATION_LIMIT = 8
 
@@ -32,7 +35,13 @@ class CitationResolver:
         self._document_repository = document_repository
 
     def resolve(self, results: Sequence[SearchResult]) -> list[Citation]:
-        """Resolve ordered Top8 results without using generated model text."""
+        """Resolve ordered Top8 results without using generated model text.
+
+        A chunk whose document disappeared is skipped: an orphan vector must not
+        make every question about that subject fail forever. The remaining
+        citations keep the rank labels of the source list, so ``S3`` still points
+        at the third prompt source even when ``S2`` was dropped.
+        """
         limited_results = results[:CITATION_LIMIT]
         try:
             documents = self._document_repository.get_by_ids(
@@ -45,9 +54,12 @@ class CitationResolver:
         for index, result in enumerate(limited_results, start=1):
             document = documents.get(result.document_id)
             if document is None:
-                raise CitationResolutionError(
-                    f"Document {result.document_id} is unavailable"
+                logger.warning(
+                    "Skipping citation S%s for missing document %s",
+                    index,
+                    result.document_id,
                 )
+                continue
             citations.append(
                 Citation(
                     id=f"S{index}",

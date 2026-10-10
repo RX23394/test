@@ -21,6 +21,9 @@ class DocumentStatus(StrEnum):
     COMPLETED = "completed"
     INDEXED = "indexed"
     FAILED = "failed"
+    # Set before Qdrant, FTS5, and the source file are cleaned up, so a failed
+    # or interrupted deletion stays visible instead of leaving orphan vectors.
+    PENDING_DELETE = "pending_delete"
 
 
 class Document(Base):

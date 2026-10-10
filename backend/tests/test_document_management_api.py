@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.auth.security import create_access_token
 from app.core.config import Settings, get_settings
 from app.main import app
+from app.models.document import DocumentStatus
 from app.rag.dependencies import get_qdrant_repository
 from app.repositories.document import DocumentRepository
 from app.repositories.user import UserRepository
@@ -140,12 +141,16 @@ async def test_admin_deletes_document_and_source_file(
 
 
 @pytest.mark.asyncio
-async def test_admin_deletion_succeeds_when_qdrant_is_unavailable(
+async def test_admin_deletion_keeps_the_row_when_qdrant_is_unavailable(
     client: httpx.AsyncClient,
     session_factory: sessionmaker[Session],
     management_upload_dir: Path,
 ) -> None:
-    """Vector cleanup is best-effort and cannot block canonical deletion."""
+    """Vector cleanup failure leaves a visible pending_delete document.
+
+    Deleting the row while Qdrant still holds its points is what produced
+    orphaned vectors, and every later citation for the same subject failed.
+    """
     admin_id = authenticate_admin(client, session_factory)
     with session_factory() as session:
         document = DocumentRepository(session).create(
@@ -162,8 +167,47 @@ async def test_admin_deletion_succeeds_when_qdrant_is_unavailable(
 
     response = await client.delete(f"/api/admin/documents/{document_id}")
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "error",
+        "message": "Document deletion service is unavailable",
+    }
+    assert source_path.exists()
+    with session_factory() as session:
+        stored = DocumentRepository(session).get_by_id(document_id)
+        assert stored is not None
+        assert stored.status is DocumentStatus.PENDING_DELETE
+
+
+@pytest.mark.asyncio
+async def test_admin_deletion_retry_finishes_an_interrupted_delete(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    management_upload_dir: Path,
+) -> None:
+    """Retrying after the vector service recovers removes the pending document."""
+    admin_id = authenticate_admin(client, session_factory)
+    with session_factory() as session:
+        document = DocumentRepository(session).create(
+            filename="retry-delete.txt",
+            original_filename="Retry Delete.txt",
+            sha256="e" * 64,
+            file_size=7,
+            uploader_id=admin_id,
+        )
+        document_id = document.id
+    source_path = management_upload_dir / document.filename
+    source_path.write_text("content", encoding="utf-8")
+    app.dependency_overrides[get_qdrant_repository] = UnavailableQdrantRepository
+    failed_response = await client.delete(f"/api/admin/documents/{document_id}")
+    assert failed_response.status_code == 503
+
+    fake_qdrant = FakeQdrantRepository()
+    app.dependency_overrides[get_qdrant_repository] = lambda: fake_qdrant
+    retried_response = await client.delete(f"/api/admin/documents/{document_id}")
+
+    assert retried_response.status_code == 200
+    assert fake_qdrant.deleted_document_ids == [document_id]
     assert not source_path.exists()
     with session_factory() as session:
         assert DocumentRepository(session).get_by_id(document_id) is None

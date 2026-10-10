@@ -1,5 +1,7 @@
 """Tests for database-backed citation resolution."""
 
+from typing import cast
+
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -12,6 +14,15 @@ from app.services.citation_resolver import (
     CitationResolutionError,
     CitationResolver,
 )
+
+
+class FailingDocumentRepository:
+    """Simulate a database outage during citation lookup."""
+
+    def get_by_ids(self, document_ids: list[int]) -> dict[int, object]:
+        """Fail like an unreachable database."""
+        del document_ids
+        raise RuntimeError("database is unavailable")
 
 
 def create_result(document_id: int, index: int = 0) -> SearchResult:
@@ -85,15 +96,46 @@ def test_citation_resolver_preserves_rank_labels_and_top8_limit(
         assert citations[-1].content == "Original database chunk 8"
 
 
-def test_citation_resolver_rejects_missing_database_document(
+def test_citation_resolver_skips_an_orphaned_retrieval_row(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """Missing metadata fails instead of fabricating a visible source."""
+    """A missing document drops its own citation but keeps the other labels."""
+    with session_factory() as session:
+        user = UserRepository(session).create(
+            username="citation-orphan-owner",
+            password_hash="hash",
+        )
+        document = DocumentRepository(session).create(
+            filename="stored-orphan.pdf",
+            original_filename="Orphan.pdf",
+            sha256="c" * 64,
+            file_size=100,
+            uploader_id=user.id,
+        )
+
+        citations = CitationResolver(DocumentRepository(session)).resolve(
+            [create_result(999), create_result(document.id, index=1)]
+        )
+
+    assert [citation.id for citation in citations] == ["S2"]
+    assert citations[0].document == "Orphan.pdf"
+    assert citations[0].page == 13
+
+
+def test_citation_resolver_returns_nothing_for_only_orphaned_rows(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """An empty citation list is better than failing every question forever."""
     with session_factory() as session:
         resolver = CitationResolver(DocumentRepository(session))
 
-        with pytest.raises(
-            CitationResolutionError,
-            match="Document 999 is unavailable",
-        ):
-            resolver.resolve([create_result(999)])
+        assert resolver.resolve([create_result(999)]) == []
+
+
+def test_citation_resolver_reports_database_lookup_failures() -> None:
+    """A database outage is still surfaced as a citation resolution error."""
+    repository = cast(DocumentRepository, FailingDocumentRepository())
+    resolver = CitationResolver(repository)
+
+    with pytest.raises(CitationResolutionError, match="lookup failed"):
+        resolver.resolve([create_result(1)])

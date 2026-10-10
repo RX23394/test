@@ -129,14 +129,21 @@ def delete_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found",
         )
+    # Mark the row first: if any cleanup step fails, the document stays visible
+    # as pending_delete instead of vanishing while its vectors remain orphaned.
+    repository.update_status(document, DocumentStatus.PENDING_DELETE)
     try:
         qdrant_repository.delete_document(document.id)
-    except Exception:
+    except Exception as exc:
         logger.warning(
             "Vector index cleanup failed during document deletion",
             extra={"document_id": document.id},
             exc_info=True,
         )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Document deletion service is unavailable",
+        ) from exc
 
     try:
         FtsChunkRepository(session).delete_document(document.id)

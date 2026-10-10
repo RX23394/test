@@ -8,7 +8,8 @@ export type DocumentStatus =
   | "processing"
   | "completed"
   | "indexed"
-  | "failed";
+  | "failed"
+  | "pending_delete";
 
 export interface DocumentRecord {
   id: number;
