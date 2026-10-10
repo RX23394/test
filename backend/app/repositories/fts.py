@@ -1,6 +1,5 @@
 """SQLite FTS5 repository for document chunks."""
 
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -15,8 +14,6 @@ from app.schemas.search import RetrievalCandidate
 from app.services.tokenization import TokenizationService, get_tokenization_service
 
 FTS_TABLE_NAME = DOCUMENT_CHUNKS_FTS_TABLE
-CHUNK_INDEX_TABLE_NAME = "chunk_index"
-SEARCH_TERM_PATTERN = re.compile(r"[^\W_]+", flags=re.UNICODE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,105 +148,6 @@ class FtsChunkRepository:
                 page=int(row["page"]) if row["page"] is not None else None,
                 section=str(row["section"]) if row["section"] is not None else None,
                 score=float(row["score"]),
-            )
-            for row in rows
-        ]
-
-
-@dataclass(frozen=True, slots=True)
-class ChunkIndexEntry:
-    """One chunk returned from the standalone SQLite FTS5 index."""
-
-    chunk_id: str
-    document_id: int
-    content: str
-
-
-class ChunkIndexRepository:
-    """Insert, delete, and search chunks using native SQLite FTS5."""
-
-    def __init__(self, session: Session) -> None:
-        """Initialize the repository with a SQLAlchemy database session."""
-        self._session = session
-
-    def insert(
-        self,
-        chunk_id: str,
-        document_id: int,
-        content: str,
-        *,
-        commit: bool = True,
-    ) -> None:
-        """Insert a chunk immediately or within the caller's transaction."""
-        try:
-            self._session.execute(
-                text(
-                    f"DELETE FROM {CHUNK_INDEX_TABLE_NAME} "
-                    "WHERE chunk_id = :chunk_id"
-                ),
-                {"chunk_id": chunk_id},
-            )
-            self._session.execute(
-                text(
-                    f"""
-                    INSERT INTO {CHUNK_INDEX_TABLE_NAME}
-                        (chunk_id, document_id, content)
-                    VALUES
-                        (:chunk_id, :document_id, :content)
-                    """
-                ),
-                {
-                    "chunk_id": chunk_id,
-                    "document_id": document_id,
-                    "content": content,
-                },
-            )
-            if commit:
-                self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
-
-    def delete(self, chunk_id: str) -> None:
-        """Delete one indexed chunk by its stable chunk ID."""
-        try:
-            self._session.execute(
-                text(
-                    f"DELETE FROM {CHUNK_INDEX_TABLE_NAME} "
-                    "WHERE chunk_id = :chunk_id"
-                ),
-                {"chunk_id": chunk_id},
-            )
-            self._session.commit()
-        except SQLAlchemyError:
-            self._session.rollback()
-            raise
-
-    def search(self, query: str, limit: int = 10) -> list[ChunkIndexEntry]:
-        """Return BM25-ranked chunks matching full-text query terms."""
-        if limit <= 0:
-            raise ValueError("limit must be positive")
-        terms = SEARCH_TERM_PATTERN.findall(query)
-        if not terms:
-            return []
-        match_query = " OR ".join(f'"{term}"' for term in terms)
-        rows = self._session.execute(
-            text(
-                f"""
-                SELECT chunk_id, document_id, content
-                FROM {CHUNK_INDEX_TABLE_NAME}
-                WHERE {CHUNK_INDEX_TABLE_NAME} MATCH :match_query
-                ORDER BY bm25({CHUNK_INDEX_TABLE_NAME})
-                LIMIT :limit
-                """
-            ),
-            {"match_query": match_query, "limit": limit},
-        ).mappings()
-        return [
-            ChunkIndexEntry(
-                chunk_id=str(row["chunk_id"]),
-                document_id=int(row["document_id"]),
-                content=str(row["content"]),
             )
             for row in rows
         ]

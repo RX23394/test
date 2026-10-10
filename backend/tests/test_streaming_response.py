@@ -13,7 +13,7 @@ from app.api.routes.chat import (
     stream_chat_events,
 )
 from app.schemas.chat import ChatRequest, CitationSource
-from app.services.citation_builder import Citation
+from app.services.citation_resolver import Citation
 from app.services.llm_errors import (
     LLMAPIError,
     LLMTimeoutError,

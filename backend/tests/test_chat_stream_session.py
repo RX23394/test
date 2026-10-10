@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.routes.chat import persist_stream_exchange, stream_chat
 from app.db.base import Base
-from app.db.schema import current_chunk_index_ddl, current_document_chunks_fts_ddl
+from app.db.schema import current_document_chunks_fts_ddl
 from app.db.session import get_session_factory
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole
@@ -36,7 +36,6 @@ def engine() -> Iterator[Engine]:
     Base.metadata.create_all(created)
     with created.begin() as connection:
         connection.exec_driver_sql(current_document_chunks_fts_ddl())
-        connection.exec_driver_sql(current_chunk_index_ddl())
     yield created
     Base.metadata.drop_all(created)
     created.dispose()

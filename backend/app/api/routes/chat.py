@@ -16,8 +16,8 @@ from app.repositories.document import DocumentRepository
 from app.repositories.fts import FtsChunkRepository
 from app.schemas.chat import ChatRequest, CitationSource
 from app.schemas.response import ResponseModel
-from app.services.citation_builder import Citation
 from app.services.citation_resolver import (
+    Citation,
     CitationResolutionError,
     CitationResolver,
 )

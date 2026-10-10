@@ -9,7 +9,6 @@ migration has to keep describing the schema as it was at that revision.
 from collections.abc import Sequence
 
 DOCUMENT_CHUNKS_FTS_TABLE = "document_chunks_fts"
-CHUNK_INDEX_TABLE = "chunk_index"
 
 # Logical columns per table, in FTS5 declaration order, paired with whether the
 # column is stored but not full-text indexed.
@@ -23,12 +22,6 @@ DOCUMENT_CHUNKS_FTS_COLUMNS: tuple[tuple[str, bool], ...] = (
     # token stream is indexed here and ``content`` is only stored. See
     # ``app/services/tokenization.py``.
     ("content_tokens", False),
-)
-
-CHUNK_INDEX_COLUMNS: tuple[tuple[str, bool], ...] = (
-    ("chunk_id", True),
-    ("document_id", True),
-    ("content", False),
 )
 
 # SQLite only enforces ``ON DELETE CASCADE`` when foreign key enforcement is
@@ -61,8 +54,3 @@ def current_document_chunks_fts_ddl() -> str:
         DOCUMENT_CHUNKS_FTS_COLUMNS,
         "unicode61",
     )
-
-
-def current_chunk_index_ddl() -> str:
-    """Return the standalone chunk index DDL the current code queries."""
-    return build_fts5_ddl(CHUNK_INDEX_TABLE, CHUNK_INDEX_COLUMNS, "unicode61")

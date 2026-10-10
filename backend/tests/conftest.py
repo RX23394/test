@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.models as models
 from app.db.base import Base
-from app.db.schema import current_chunk_index_ddl, current_document_chunks_fts_ddl
+from app.db.schema import current_document_chunks_fts_ddl
 from app.db.session import get_db, get_session_factory
 from app.main import app
 
@@ -34,7 +34,6 @@ def session_factory() -> Iterator[sessionmaker[Session]]:
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
         connection.exec_driver_sql(current_document_chunks_fts_ddl())
-        connection.exec_driver_sql(current_chunk_index_ddl())
     factory: sessionmaker[Session] = sessionmaker(
         bind=engine,
         autoflush=False,

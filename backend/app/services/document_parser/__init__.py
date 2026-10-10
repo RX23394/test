@@ -2,11 +2,6 @@
 
 from app.services.document_parser.base import Parser
 from app.services.document_parser.docx import DocxParser
-from app.services.document_parser.factory import (
-    DocumentParser,
-    ParserFactory,
-    UnsupportedFileTypeError,
-)
 from app.services.document_parser.markdown import MarkdownParser
 from app.services.document_parser.models import DocumentContent, DocumentPage
 from app.services.document_parser.pdf import PDFParser
@@ -24,14 +19,11 @@ __all__ = [
     "DocumentFileNotFoundError",
     "DocumentPage",
     "DocumentParseError",
-    "DocumentParser",
     "DocumentParsingService",
     "MarkdownParser",
     "PDFParser",
     "Parser",
-    "ParserFactory",
     "ParserRegistry",
     "TxtParser",
-    "UnsupportedFileTypeError",
     "UnsupportedParserError",
 ]

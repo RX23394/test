@@ -1,10 +1,23 @@
 """Resolve retrieval labels to database-backed source metadata."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from app.repositories.document import DocumentRepository
 from app.schemas.search import SearchResult
-from app.services.citation_builder import CITATION_LIMIT, Citation
+
+CITATION_LIMIT = 8
+
+
+@dataclass(frozen=True, slots=True)
+class Citation:
+    """One source citation exposed alongside a grounded answer."""
+
+    id: str
+    document: str
+    page: int | None
+    section: str | None
+    content: str
 
 
 class CitationResolutionError(RuntimeError):

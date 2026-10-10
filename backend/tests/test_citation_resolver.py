@@ -6,8 +6,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.repositories.document import DocumentRepository
 from app.repositories.user import UserRepository
 from app.schemas.search import SearchResult
-from app.services.citation_builder import CITATION_LIMIT, Citation
 from app.services.citation_resolver import (
+    CITATION_LIMIT,
+    Citation,
     CitationResolutionError,
     CitationResolver,
 )

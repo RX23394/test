@@ -28,8 +28,6 @@ from alembic import command
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.schema import (
-    CHUNK_INDEX_COLUMNS,
-    CHUNK_INDEX_TABLE,
     DOCUMENT_CHUNKS_FTS_COLUMNS,
     DOCUMENT_CHUNKS_FTS_TABLE,
 )
@@ -120,7 +118,7 @@ def test_migrated_schema_matches_orm_metadata(migrated_engine: Engine) -> None:
     assert missing_columns == []
 
 
-def test_migrations_define_the_fts_tables_the_application_queries(
+def test_migrations_define_the_fts_table_the_application_queries(
     migrated_engine: Engine,
 ) -> None:
     """The migrated database must expose the FTS columns the code reads."""
@@ -131,15 +129,8 @@ def test_migrations_define_the_fts_tables_the_application_queries(
                 f"PRAGMA table_info({DOCUMENT_CHUNKS_FTS_TABLE})"
             ).mappings()
         }
-        index_columns = {
-            row["name"]
-            for row in connection.exec_driver_sql(
-                f"PRAGMA table_info({CHUNK_INDEX_TABLE})"
-            ).mappings()
-        }
 
     assert chunks_columns == {name for name, _ in DOCUMENT_CHUNKS_FTS_COLUMNS}
-    assert index_columns == {name for name, _ in CHUNK_INDEX_COLUMNS}
 
 
 def test_migrated_database_enables_foreign_key_enforcement(
