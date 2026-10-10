@@ -102,8 +102,13 @@ class FtsChunkRepository:
             for row in rows
         ]
 
-    def delete_document(self, document_id: int) -> None:
-        """Delete all full-text chunks belonging to one document."""
+    def delete_document(self, document_id: int, *, commit: bool = True) -> None:
+        """Delete all full-text chunks belonging to one document.
+
+        ``commit=False`` leaves the transaction to the caller, which is what lets
+        a multi-store flow commit the index cleanup and the row deletion
+        together instead of one after the other.
+        """
         try:
             self._session.execute(
                 text(
@@ -111,9 +116,13 @@ class FtsChunkRepository:
                 ),
                 {"document_id": document_id},
             )
-            self._session.commit()
+            if commit:
+                self._session.commit()
+            else:
+                self._session.flush()
         except SQLAlchemyError:
-            self._session.rollback()
+            if commit:
+                self._session.rollback()
             raise
 
     def search(self, query: str, limit: int) -> list[RetrievalCandidate]:

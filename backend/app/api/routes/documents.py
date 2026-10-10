@@ -168,12 +168,17 @@ def delete_document(
             detail="Document deletion service is unavailable",
         ) from exc
 
+    # Index cleanup and row deletion share one transaction: committing the FTS
+    # delete on its own would leave a live document that can no longer be found
+    # by keyword search if the row delete then failed.
     try:
-        FtsChunkRepository(session).delete_document(document.id)
+        FtsChunkRepository(session).delete_document(document.id, commit=False)
         source_path = get_settings().document_upload_dir / document.filename
         source_path.unlink(missing_ok=True)
-        repository.delete(document)
+        repository.delete(document, commit=False)
+        session.commit()
     except (OSError, RuntimeError, SQLAlchemyError, ValueError) as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Document deletion service is unavailable",

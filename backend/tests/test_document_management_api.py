@@ -4,6 +4,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth.security import create_access_token
@@ -12,7 +13,9 @@ from app.main import app
 from app.models.document import DocumentStatus
 from app.rag.dependencies import get_qdrant_repository
 from app.repositories.document import DocumentRepository
+from app.repositories.fts import FtsChunkRepository
 from app.repositories.user import UserRepository
+from app.schemas.chunk import Chunk
 
 
 class FakeQdrantRepository:
@@ -177,6 +180,69 @@ async def test_admin_deletion_keeps_the_row_when_qdrant_is_unavailable(
         stored = DocumentRepository(session).get_by_id(document_id)
         assert stored is not None
         assert stored.status is DocumentStatus.PENDING_DELETE
+
+
+@pytest.mark.asyncio
+async def test_admin_deletion_rolls_back_index_cleanup_when_the_row_delete_fails(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    management_upload_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Index cleanup and row deletion commit together or not at all.
+
+    Committing the keyword-index cleanup on its own would leave a document that
+    still exists but can no longer be found by keyword search.
+    """
+    admin_id = authenticate_admin(client, session_factory)
+    with session_factory() as session:
+        repository = DocumentRepository(session)
+        document = repository.create(
+            filename="rollback.txt",
+            original_filename="Rollback.txt",
+            sha256="f" * 64,
+            file_size=7,
+            uploader_id=admin_id,
+        )
+        FtsChunkRepository(session).replace_document_chunks(
+            document,
+            [
+                Chunk(
+                    content="OSPF routing",
+                    page=1,
+                    section="Routing",
+                    chunk_index=0,
+                )
+            ],
+        )
+        document_id = document.id
+    source_path = management_upload_dir / document.filename
+    source_path.write_text("content", encoding="utf-8")
+    fake_qdrant = FakeQdrantRepository()
+    app.dependency_overrides[get_qdrant_repository] = lambda: fake_qdrant
+
+    def fail_row_delete(
+        self: DocumentRepository,
+        document: object,
+        *,
+        commit: bool = True,
+    ) -> None:
+        """Fail the row deletion after the index cleanup already ran."""
+        del self, document, commit
+        raise SQLAlchemyError("row delete failed")
+
+    monkeypatch.setattr(DocumentRepository, "delete", fail_row_delete)
+
+    response = await client.delete(f"/api/admin/documents/{document_id}")
+
+    assert response.status_code == 503
+    assert fake_qdrant.deleted_document_ids == [document_id]
+    with session_factory() as session:
+        stored = DocumentRepository(session).get_by_id(document_id)
+        assert stored is not None
+        assert stored.status is DocumentStatus.PENDING_DELETE
+        keyword_hits = FtsChunkRepository(session).search("OSPF", limit=10)
+    assert [hit.document_id for hit in keyword_hits] == [document_id]
 
 
 @pytest.mark.asyncio

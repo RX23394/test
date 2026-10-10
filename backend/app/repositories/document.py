@@ -258,11 +258,15 @@ class DocumentRepository:
             raise
         return result.rowcount == 1
 
-    def delete(self, document: Document) -> None:
-        """Delete a document and commit the database transaction."""
+    def delete(self, document: Document, *, commit: bool = True) -> None:
+        """Delete a document, optionally inside the caller's transaction."""
         self._session.delete(document)
         try:
-            self._session.commit()
+            if commit:
+                self._session.commit()
+            else:
+                self._session.flush()
         except SQLAlchemyError:
-            self._session.rollback()
+            if commit:
+                self._session.rollback()
             raise
