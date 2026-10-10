@@ -58,4 +58,5 @@ jobs:
       - name: Validate Docker Compose configuration
         env:
           JWT_SECRET_KEY: ci-only-secret-with-at-least-32-characters
+          QDRANT_API_KEY: ci-only-qdrant-key
         run: docker compose config --quiet

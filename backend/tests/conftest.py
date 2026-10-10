@@ -10,6 +10,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.models as models
+from app.core.config import get_settings
+from app.core.rate_limit import (
+    FixedWindowRateLimiter,
+    get_chat_rate_limiter,
+    get_login_rate_limiter,
+)
 from app.db.base import Base
 from app.db.schema import current_document_chunks_fts_ddl
 from app.db.session import get_db, get_session_factory
@@ -59,6 +65,19 @@ async def client(
     # Work that outlives the request, such as persisting a streamed answer, must
     # land in the same isolated database instead of the module-level factory.
     app.dependency_overrides[get_session_factory] = lambda: session_factory
+    # Rate limiters keep process-wide state, so every test gets fresh instances;
+    # tests that exercise limiting override these with a tighter limiter.
+    settings = get_settings()
+    login_limiter = FixedWindowRateLimiter(
+        settings.login_max_attempts,
+        settings.login_window_seconds,
+    )
+    chat_limiter = FixedWindowRateLimiter(
+        settings.chat_max_requests,
+        settings.chat_window_seconds,
+    )
+    app.dependency_overrides[get_login_rate_limiter] = lambda: login_limiter
+    app.dependency_overrides[get_chat_rate_limiter] = lambda: chat_limiter
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,

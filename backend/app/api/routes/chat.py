@@ -1,15 +1,20 @@
 """Authenticated citation-grounded streaming endpoint."""
 
 import logging
+import math
 from collections.abc import Callable, Iterator, Sequence
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth.dependencies import CurrentUser, SessionDependency
 from app.core.config import get_settings
+from app.core.rate_limit import (
+    FixedWindowRateLimiter,
+    get_chat_rate_limiter,
+)
 from app.db.session import SessionFactoryDependency
 from app.rag.dependencies import EmbeddingDependency, LLMDependency, QdrantDependency
 from app.repositories.conversation import ConversationRepository
@@ -44,6 +49,11 @@ from app.services.search import HybridSearchError, HybridSearchService
 logger = logging.getLogger(__name__)
 StreamingEventName = Literal["token", "citation", "done", "error"]
 CHAT_PERSISTENCE_ERROR_MESSAGE = "Conversation could not be saved"
+CHAT_RATE_LIMIT_MESSAGE = "Too many chat requests, try again later"
+ChatRateLimiterDependency = Annotated[
+    FixedWindowRateLimiter,
+    Depends(get_chat_rate_limiter),
+]
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -219,8 +229,20 @@ def stream_chat(
     qdrant_repository: QdrantDependency,
     llm_provider: LLMDependency,
     session_factory: SessionFactoryDependency,
+    chat_limiter: ChatRateLimiterDependency,
 ) -> StreamingResponse:
     """Retrieve Top8 sources and stream a citation-grounded answer."""
+    rate_limit_key = f"user:{current_user.id}"
+    if not chat_limiter.allow(rate_limit_key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=CHAT_RATE_LIMIT_MESSAGE,
+            headers={
+                "Retry-After": str(
+                    max(1, math.ceil(chat_limiter.retry_after(rate_limit_key)))
+                )
+            },
+        )
     settings = get_settings()
     conversation_service = ConversationService(ConversationRepository(session))
     try:

@@ -2,9 +2,12 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.12.5
     restart: unless-stopped
-    ports:
-      - "6333:6333"
-      - "6334:6334"
+    environment:
+      # The vector store stays on the internal network and requires its key, so
+      # the published backend is not sitting in front of an open Qdrant.
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set}
+    expose:
+      - "6333"
     volumes:
       - qdrant_data:/qdrant/storage
 
@@ -14,11 +17,14 @@ services:
       dockerfile: Dockerfile.backend
     restart: unless-stopped
     environment:
-      APP_ENV: ${APP_ENV:-development}
+      # Explicit production mode: the development default silently skipped the
+      # JWT/secret/cookie checks. Plain-HTTP local runs must set
+      # APP_ENV=development and AUTH_COOKIE_SECURE=false themselves.
+      APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: sqlite:////app/data/network_rag.db
       DOCUMENT_UPLOAD_DIR: /app/data/uploads
       QDRANT_URL: http://qdrant:6333
-      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set}
       QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-document_chunks}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-not-required}
@@ -26,6 +32,7 @@ services:
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://127.0.0.1:8080}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      APP_DEBUG: ${APP_DEBUG:-false}
     volumes:
       - app_data:/app/data
     depends_on:

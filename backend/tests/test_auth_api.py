@@ -4,7 +4,10 @@ import httpx
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.api.routes.auth import LOGIN_RATE_LIMIT_MESSAGE
 from app.auth.security import hash_password
+from app.core.rate_limit import FixedWindowRateLimiter, get_login_rate_limiter
+from app.main import app
 from app.models.user import User
 from app.repositories.user import UserRepository
 
@@ -88,6 +91,60 @@ async def test_inactive_user_cannot_login(
     )
 
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_repeated_failed_logins_are_rate_limited(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Password guessing is bounded and answered with a Retry-After header."""
+    create_user(session_factory)
+    limiter = FixedWindowRateLimiter(limit=3, window_seconds=60)
+    app.dependency_overrides[get_login_rate_limiter] = lambda: limiter
+
+    responses = [
+        await client.post(
+            "/api/auth/login",
+            json={"username": "alice", "password": "wrong-password"},
+        )
+        for _ in range(4)
+    ]
+
+    assert [response.status_code for response in responses] == [401, 401, 401, 429]
+    assert responses[-1].json() == {
+        "status": "error",
+        "message": LOGIN_RATE_LIMIT_MESSAGE,
+    }
+    assert int(responses[-1].headers["retry-after"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_successful_login_clears_failed_attempts(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A correct password resets the counter instead of keeping the lockout."""
+    create_user(session_factory)
+    limiter = FixedWindowRateLimiter(limit=2, window_seconds=60)
+    app.dependency_overrides[get_login_rate_limiter] = lambda: limiter
+
+    failed = await client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "wrong-password"},
+    )
+    success = await client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "secure-password"},
+    )
+    after_success = await client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "wrong-password"},
+    )
+
+    assert failed.status_code == 401
+    assert success.status_code == 200
+    assert after_success.status_code == 401
 
 
 @pytest.mark.asyncio

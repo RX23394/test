@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # An indexing job that stopped without finalizing its status keeps the
     # document in "processing" forever; after this lease it can be retried.
     indexing_lease_seconds: int = Field(default=900, ge=60)
+    # In-process request limits: password guessing and chat request floods are
+    # bounded per client address and per user. A multi-worker deployment needs a
+    # shared store or a gateway instead (see README).
+    login_max_attempts: int = Field(default=5, ge=1)
+    login_window_seconds: int = Field(default=300, ge=1)
+    chat_max_requests: int = Field(default=30, ge=1)
+    chat_window_seconds: int = Field(default=60, ge=1)
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Self:

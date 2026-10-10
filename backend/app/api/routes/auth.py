@@ -1,16 +1,35 @@
 """Authentication API endpoints."""
 
-from fastapi import APIRouter, HTTPException, Response, status
+import math
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.auth.cookies import clear_auth_cookie, set_auth_cookie
 from app.auth.dependencies import CurrentUser, SessionDependency
 from app.auth.security import create_access_token
+from app.core.rate_limit import (
+    FixedWindowRateLimiter,
+    client_key,
+    get_login_rate_limiter,
+)
 from app.repositories.user import UserRepository
 from app.schemas.auth import LoginRequest, UserResponse
 from app.schemas.response import ResponseModel
 from app.services.auth import AuthService
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+LOGIN_RATE_LIMIT_MESSAGE = "Too many login attempts, try again later"
+LoginRateLimiterDependency = Annotated[
+    FixedWindowRateLimiter,
+    Depends(get_login_rate_limiter),
+]
+
+
+def _retry_after_seconds(limiter: FixedWindowRateLimiter, key: str) -> int:
+    """Return a whole-second Retry-After value for a limited request."""
+    return max(1, math.ceil(limiter.retry_after(key)))
 
 
 @router.post(
@@ -20,10 +39,20 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 )
 async def login(
     payload: LoginRequest,
+    request: Request,
     response: Response,
     session: SessionDependency,
+    login_limiter: LoginRateLimiterDependency,
 ) -> ResponseModel[UserResponse]:
     """Authenticate a user and set an HttpOnly access-token cookie."""
+    key = client_key(request, payload.username)
+    if not login_limiter.allow(key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=LOGIN_RATE_LIMIT_MESSAGE,
+            headers={"Retry-After": str(_retry_after_seconds(login_limiter, key))},
+        )
+
     user = AuthService(UserRepository(session)).authenticate(
         payload.username,
         payload.password,
@@ -34,6 +63,7 @@ async def login(
             detail="Invalid username or password",
         )
 
+    login_limiter.reset(key)
     set_auth_cookie(response, create_access_token(user.id))
     return ResponseModel(status="ok", data=UserResponse.model_validate(user))
 
