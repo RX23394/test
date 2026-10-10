@@ -12,7 +12,10 @@ from app.models import Conversation, Document, Message, User  # noqa: F401
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Keep application loggers alive: migrations also run inside the application
+    # process (for example from the database contract test), and the default
+    # disable_existing_loggers=True would silence every logger created so far.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = Base.metadata
