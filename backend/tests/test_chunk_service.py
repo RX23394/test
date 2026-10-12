@@ -4,6 +4,7 @@ import pytest
 import tiktoken
 
 from app.models.chunk import Chunk
+from app.services import chunk, token_counter
 from app.services.chunk import (
     DEFAULT_OVERLAP_TOKENS,
     DEFAULT_TARGET_TOKENS,
@@ -11,6 +12,7 @@ from app.services.chunk import (
     ChunkService,
 )
 from app.services.document_parser import DocumentContent, DocumentPage
+from app.services.token_counter import TokenCounter
 
 
 def create_content(
@@ -26,6 +28,17 @@ def create_content(
     )
 
 
+def create_service(**kwargs: object) -> ChunkService:
+    """Create a chunker whose windows are measured with a cheap tokenizer.
+
+    The production default measures with the embedding model's tokenizer, which
+    needs the model assets; window arithmetic is independent of that choice, so
+    unit tests pin cl100k for deterministic expectations.
+    """
+    kwargs.setdefault("token_counter", TokenCounter("cl100k_base"))
+    return ChunkService(**kwargs)  # type: ignore[arg-type]
+
+
 def test_chunk_service_prefers_markdown_heading_boundaries() -> None:
     """Markdown headings create separate chunks and section metadata."""
     document = create_content(
@@ -33,7 +46,7 @@ def test_chunk_service_prefers_markdown_heading_boundaries() -> None:
         page_number=2,
     )
 
-    chunks = ChunkService().create_chunks(document)
+    chunks = create_service().create_chunks(document)
 
     assert [chunk.text for chunk in chunks] == [
         "# Introduction\nIntro text.",
@@ -48,7 +61,7 @@ def test_chunk_service_prefers_natural_paragraph_boundaries() -> None:
         "alpha beta gamma delta\n\n" "one two three four\n\n" "red blue green yellow"
     )
 
-    chunks = ChunkService(target_tokens=12, overlap_tokens=0).create_chunks(document)
+    chunks = create_service(target_tokens=12, overlap_tokens=0).create_chunks(document)
 
     assert [chunk.text for chunk in chunks] == [
         "alpha beta gamma delta\n\none two three four",
@@ -63,7 +76,7 @@ def test_chunk_service_uses_complete_word_overlap() -> None:
     source_words = [f"word{index}" for index in range(30)]
     document = create_content(" ".join(source_words))
 
-    chunks = ChunkService(target_tokens=12, overlap_tokens=3).create_chunks(document)
+    chunks = create_service(target_tokens=12, overlap_tokens=3).create_chunks(document)
 
     assert len(chunks) > 1
     assert all(chunk.token_count <= 12 for chunk in chunks)
@@ -84,7 +97,7 @@ def test_chunk_service_defaults_to_about_320_tokens_with_48_overlap() -> None:
     encoding = tiktoken.get_encoding("cl100k_base")
     document = create_content(" ".join(f"token{index}" for index in range(500)))
 
-    chunks = ChunkService().create_chunks(document)
+    chunks = create_service().create_chunks(document)
 
     assert len(chunks) > 1
     assert all(chunk.token_count <= DEFAULT_TARGET_TOKENS for chunk in chunks)
@@ -98,6 +111,83 @@ def test_chunk_service_defaults_to_about_320_tokens_with_48_overlap() -> None:
     assert overlap_size > 0
     overlap_text = " ".join(current_words[:overlap_size])
     assert len(encoding.encode(overlap_text)) >= DEFAULT_OVERLAP_TOKENS
+
+
+def test_chunk_service_sizes_chunks_with_the_embedding_tokenizer() -> None:
+    """Chunk limits are measured with the encoder that will embed them.
+
+    ASCII diagrams are the regression case: cl100k counts a "+-+-+-+-+-+" rule
+    as a single token while the embedding tokenizer spends several per rule, so
+    a chunk that fit the cl100k budget used to overflow the 512-token encoder
+    window and abort indexing with ``EmbeddingInputTooLongError``.
+    """
+    rule = "+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+"
+    diagram = "\n".join(
+        [
+            "Header Format",
+            "",
+            rule,
+            "|Version| Traffic Class |           Flow Label                  |",
+            rule,
+            "|         Payload Length        |  Next Header  |   Hop Limit   |",
+            rule,
+        ]
+        * 4
+    )
+
+    chunks = ChunkService().create_chunks(create_content(diagram))
+
+    assert len(chunks) > 1
+    assert all(0 < chunk.token_count <= MAX_CHUNK_TOKENS for chunk in chunks)
+
+
+def test_chunk_service_counts_the_passage_overhead_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The encoder's per-passage cost is charged once, not once per word.
+
+    Charging it per word inflated a 50-word paragraph by 200 tokens, which cut
+    the window to a fraction of its target and multiplied the chunk count.
+    """
+
+    class WordTokenizer:
+        """Count one token per whitespace-separated word."""
+
+        def __call__(self, text: str, **_: object) -> dict[str, list[int]]:
+            return {"input_ids": list(range(len(text.split())))}
+
+    class WordEncoding:
+        """Count one token per whitespace-separated word, as the encoder would."""
+
+        def encode(self, text: str) -> list[int]:
+            """Return one token id per word."""
+            return list(range(len(text.split())))
+
+    # Patch in each module's own namespace: both import the constant directly.
+    monkeypatch.setattr(token_counter, "EMBEDDING_PASSAGE_OVERHEAD", 0)
+    monkeypatch.setattr(chunk, "EMBEDDING_PASSAGE_OVERHEAD", 0)
+    monkeypatch.setattr(
+        token_counter,
+        "_load_embedding_encoding",
+        lambda: WordEncoding(),
+    )
+
+    words = " ".join(f"word{index}" for index in range(20))
+    # No injected counter: this test measures the embedding backend itself.
+    chunks = ChunkService(
+        target_tokens=10,
+        overlap_tokens=0,
+        max_chunk_tokens=10,
+    ).create_chunks(create_content(words))
+
+    # 20 single-token words at a target of 10 must produce exactly two chunks.
+    # A per-word passage overhead would have split them into many more, and the
+    # special-token pair would have shrunk the window further.
+    assert len(chunks) == 2
+    assert [chunk.text.split() for chunk in chunks] == [
+        [f"word{index}" for index in range(10)],
+        [f"word{index}" for index in range(10, 20)],
+    ]
 
 
 def test_chunk_service_splits_a_long_unbroken_chinese_paragraph() -> None:
@@ -132,7 +222,7 @@ def test_chunk_service_rejects_a_hard_limit_below_the_target() -> None:
 def test_chunk_service_never_truncates_words() -> None:
     """Long paragraphs are windowed only between complete source words."""
     source_words = [f"extraordinaryword{index}" for index in range(25)]
-    chunks = ChunkService(target_tokens=20, overlap_tokens=4).create_chunks(
+    chunks = create_service(target_tokens=20, overlap_tokens=4).create_chunks(
         create_content(" ".join(source_words))
     )
 

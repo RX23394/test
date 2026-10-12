@@ -5,15 +5,24 @@ from dataclasses import dataclass
 
 from app.models.chunk import Chunk
 from app.services.document_parser import DocumentContent, DocumentPage
-from app.services.token_counter import TokenCounter
+from app.services.token_counter import (
+    EMBEDDING_ENCODING_NAME,
+    EMBEDDING_PASSAGE_OVERHEAD,
+    TokenCounter,
+    embedding_prefix_tokens,
+)
 
 DEFAULT_TARGET_TOKENS = 320
 DEFAULT_OVERLAP_TOKENS = 48
-DEFAULT_ENCODING_NAME = "cl100k_base"
-# The embedding model truncates at 512 E5 tokens, and cl100k counts Chinese text
-# at roughly 20% fewer tokens than E5. A 400-token cl100k ceiling therefore keeps
-# every chunk inside the encoder window instead of dropping its tail silently.
-MAX_CHUNK_TOKENS = 400
+# Chunk sizes are measured with the embedding model's own tokenizer. cl100k
+# undercounts ASCII-dense text such as the "+-+-+" rules in RFC diagrams by up
+# to five times, so chunks that fit a cl100k budget were still rejected by the
+# encoder's 512-token window and aborted indexing.
+DEFAULT_ENCODING_NAME = EMBEDDING_ENCODING_NAME
+# The limits below are therefore expressed in embedding tokens, inside the
+# encoder's 512-token window; the tail of an oversized chunk would otherwise be
+# dropped by the tokenizer without any error.
+MAX_CHUNK_TOKENS = 450
 MARKDOWN_HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 WORD_PATTERN = re.compile(r"\s*\S+")
 PARAGRAPH_BREAK_PATTERN = re.compile(r"(?:\r?\n)[ \t]*(?:\r?\n)")
@@ -47,8 +56,13 @@ class ChunkService:
         overlap_tokens: int = DEFAULT_OVERLAP_TOKENS,
         encoding_name: str = DEFAULT_ENCODING_NAME,
         max_chunk_tokens: int = MAX_CHUNK_TOKENS,
+        token_counter: TokenCounter | None = None,
     ) -> None:
-        """Initialize token targets, overlap, and tokenizer encoding."""
+        """Initialize token targets, overlap, and tokenizer encoding.
+
+        ``token_counter`` overrides ``encoding_name``; tests inject a cheap
+        counter so chunk windows stay deterministic without loading the encoder.
+        """
         if target_tokens <= 0:
             raise ValueError("target_tokens must be positive")
         if overlap_tokens < 0 or overlap_tokens >= target_tokens:
@@ -61,7 +75,23 @@ class ChunkService:
         self._target_tokens = target_tokens
         self._overlap_tokens = overlap_tokens
         self._max_chunk_tokens = max_chunk_tokens
-        self._token_counter = TokenCounter(encoding_name)
+        self._token_counter = token_counter or TokenCounter(encoding_name)
+        # Text tokens are counted straight from the tokenizer, so the encoder's
+        # fixed per-passage cost is added exactly once, when a finished chunk is
+        # measured. Word counts stay raw: adding the cost per word would inflate
+        # a paragraph by roughly twice its word count and cut the window short.
+        self._passage_overhead = (
+            EMBEDDING_PASSAGE_OVERHEAD + embedding_prefix_tokens()
+            if token_counter is None and encoding_name == EMBEDDING_ENCODING_NAME
+            else 0
+        )
+        # Words and sentences are measured without the per-passage cost, so they
+        # are compared against the hard limit with the cost already deducted.
+        self._word_token_limit = max(1, self._max_chunk_tokens - self._passage_overhead)
+
+    def _count(self, text: str) -> int:
+        """Return the encoder token cost of one finished chunk."""
+        return self._token_counter.count(text) + self._passage_overhead
 
     def create_chunks(self, document: DocumentContent) -> list[Chunk]:
         """Return globally indexed chunks for one parsed document."""
@@ -148,7 +178,7 @@ class ChunkService:
                     section=section.title,
                     chunk_index=chunk_index,
                     text=text,
-                    token_count=self._token_counter.count(text),
+                    token_count=self._count(text),
                 )
             )
             if end == len(words):
@@ -179,14 +209,14 @@ class ChunkService:
 
     def _split_oversized_word(self, word: str) -> list[str]:
         """Return one or more pieces that each fit the hard chunk limit."""
-        if self._token_counter.count(word) <= self._max_chunk_tokens:
+        if self._token_counter.count(word) <= self._word_token_limit:
             return [word]
 
         pieces: list[str] = []
         for sentence in SENTENCE_BOUNDARY_PATTERN.split(word):
             if not sentence:
                 continue
-            if self._token_counter.count(sentence) <= self._max_chunk_tokens:
+            if self._token_counter.count(sentence) <= self._word_token_limit:
                 pieces.append(sentence)
             else:
                 pieces.extend(self._split_by_token_budget(sentence))
@@ -208,7 +238,7 @@ class ChunkService:
         high = len(text)
         while low < high:
             middle = (low + high + 1) // 2
-            if self._token_counter.count(text[start:middle]) <= self._max_chunk_tokens:
+            if self._token_counter.count(text[start:middle]) <= self._word_token_limit:
                 low = middle
             else:
                 high = middle - 1
