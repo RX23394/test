@@ -6,6 +6,7 @@ from app.schemas.search import RetrievalCandidate
 from app.services.search import (
     FTS_SEARCH_LIMIT,
     HYBRID_RESULT_LIMIT,
+    MAX_CHUNKS_PER_DOCUMENT,
     VECTOR_SEARCH_LIMIT,
     HybridSearchService,
 )
@@ -58,24 +59,24 @@ class FakeTextRepository:
         return self._candidates[:limit]
 
 
-def make_candidate(chunk_index: int) -> RetrievalCandidate:
+def make_candidate(chunk_index: int, document_id: int = 1) -> RetrievalCandidate:
     """Create one ranked candidate for an RRF test."""
     return RetrievalCandidate(
-        document_id=1,
+        document_id=document_id,
         chunk_index=chunk_index,
         content=f"chunk {chunk_index}",
         score=1.0,
     )
 
 
-def test_hybrid_search_uses_top30_rrf_and_returns_top8() -> None:
+def test_hybrid_search_requests_the_full_pool_and_returns_top8() -> None:
     """Overlapping candidates are RRF boosted and the result is limited to eight."""
     embedding_provider = FakeQueryEmbeddingProvider()
     vector_repository = FakeVectorRepository(
-        [make_candidate(index) for index in range(30)]
+        [make_candidate(index, document_id=index) for index in range(30)]
     )
     text_repository = FakeTextRepository(
-        [make_candidate(index) for index in range(7, 27)]
+        [make_candidate(index, document_id=index) for index in range(7, 27)]
     )
     service = HybridSearchService(
         embedding_provider,
@@ -86,11 +87,43 @@ def test_hybrid_search_uses_top30_rrf_and_returns_top8() -> None:
     results = service.search("routing")
 
     assert embedding_provider.query == "routing"
-    assert vector_repository.limit == VECTOR_SEARCH_LIMIT == 30
+    assert vector_repository.limit == VECTOR_SEARCH_LIMIT
     assert text_repository.limit == FTS_SEARCH_LIMIT == 20
     assert len(results) == HYBRID_RESULT_LIMIT == 8
     assert results[0].chunk_index == 7
     assert {result.chunk_index for result in results}.issubset(set(range(7, 30)))
+
+
+def test_hybrid_search_spends_at_most_two_slots_on_one_document() -> None:
+    """One document cannot monopolise the prompt.
+
+    RRF scores by rank position, so a document owning many neighbouring ranks
+    used to take most of the eight slots while the document that actually
+    answered the question stayed outside the candidate set. Measured on the
+    bundled corpus, a Chinese note took six slots for an OSPF question and the
+    OSPF RFC was never sent to the model at all.
+    """
+    dominant = [make_candidate(index, document_id=1) for index in range(10)]
+    trailing = [make_candidate(index, document_id=2) for index in range(50, 54)]
+    service = HybridSearchService(
+        FakeQueryEmbeddingProvider(),
+        FakeVectorRepository([*dominant, *trailing]),
+        FakeTextRepository([]),
+    )
+
+    results = service.search("routing")
+
+    per_document: dict[int, int] = {}
+    for result in results:
+        per_document[result.document_id] = per_document.get(result.document_id, 0) + 1
+
+    # Two documents exist, so the cap yields two chunks each rather than filling
+    # all eight slots from the dominant document.
+    assert per_document == {1: MAX_CHUNKS_PER_DOCUMENT, 2: MAX_CHUNKS_PER_DOCUMENT}
+    assert MAX_CHUNKS_PER_DOCUMENT == 2
+    assert len(results) == 4
+    assert results[0].document_id == 1
+    assert results[-1].document_id == 2
 
 
 def test_hybrid_search_drops_vector_candidates_below_the_relevance_floor() -> None:

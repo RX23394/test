@@ -12,9 +12,19 @@ from app.services.vector_search import VectorSearchResult
 
 logger = logging.getLogger(__name__)
 
-VECTOR_SEARCH_LIMIT = 30
+# RRF scores a candidate by its rank position, and a document with many chunks
+# clustered near the top of the vector ranking hands those neighbouring ranks to
+# its own chunks. At the previous limit of 30 such a document took six of the
+# eight prompt slots while the document that actually answered the question sat
+# at rank 33 and never entered the candidate set at all. A wider pool plus a
+# per-document cap is what keeps the prompt from being monopolised: measured on
+# the bundled corpus, raising the pool alone changed nothing, because the fused
+# order is decided by rank, not by pool size.
+VECTOR_SEARCH_LIMIT = 200
 FTS_SEARCH_LIMIT = 20
 HYBRID_RESULT_LIMIT = 8
+# Highest-ranked chunks of one document still allowed into the prompt.
+MAX_CHUNKS_PER_DOCUMENT = 2
 RRF_K = 60
 
 
@@ -112,7 +122,7 @@ class HybridSearchService:
         ranked_keys = sorted(
             scores,
             key=lambda key: (-scores[key], key[0], key[1]),
-        )[:HYBRID_RESULT_LIMIT]
+        )
         return [
             SearchResult(
                 document_id=candidates[key].document_id,
@@ -122,8 +132,37 @@ class HybridSearchService:
                 section=candidates[key].section,
                 score=scores[key],
             )
-            for key in ranked_keys
+            for key in _limit_per_document(ranked_keys)
         ]
+
+
+def _limit_per_document(
+    ranked_keys: Sequence[tuple[int, int]],
+    *,
+    per_document: int = MAX_CHUNKS_PER_DOCUMENT,
+    total: int = HYBRID_RESULT_LIMIT,
+) -> list[tuple[int, int]]:
+    """Take the best-ranked chunks while capping how many share a document.
+
+    Candidates arrive in rank order, so walking them and skipping a document
+    once it reaches its cap keeps the highest-ranked chunk of every document
+    that is represented, instead of letting one document fill the prompt. The
+    cap never reduces the result count below ``total`` unless the candidates run
+    out first.
+    """
+    if per_document < 1:
+        raise ValueError("per_document must be at least 1")
+    chosen: list[tuple[int, int]] = []
+    taken: dict[int, int] = {}
+    for key in ranked_keys:
+        document_id = key[0]
+        if taken.get(document_id, 0) >= per_document:
+            continue
+        taken[document_id] = taken.get(document_id, 0) + 1
+        chosen.append(key)
+        if len(chosen) >= total:
+            break
+    return chosen
 
 
 class VectorQuestionSearch(Protocol):
