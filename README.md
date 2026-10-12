@@ -72,6 +72,14 @@ python -m scripts.dev
 通过后再启动前端，优先使用项目 `.venv` 中的 Python，并自动同步前端
 API 地址与后端 CORS 来源配置。
 
+Windows 上也可以直接运行项目根目录的 `start-dev.bat`：它会检查 `.venv`、
+`.env` 和端口占用情况，执行 `alembic upgrade head`，在缺少
+`frontend\node_modules` 时自动 `npm ci`，然后各开一个窗口启动两个服务，并在
+`/health` 与前端首页都返回 200 之后才报告成功。`start-dev.bat --skip-migrate`
+跳过迁移检查，`start-dev.bat --no-browser` 不自动打开浏览器。配套的
+`stop-dev.bat` 会按端口终止两个服务及其进程树（uvicorn 的 reloader 和
+`npm run dev` 的包装进程都算在内），适合窗口已关但端口仍被占用的情况。
+
 ### 4. 创建管理员
 
 数据库迁移完成后，在 `backend` 目录执行：
@@ -125,7 +133,7 @@ docker compose exec backend python -m app.cli.create_admin
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `DATABASE_URL` | `sqlite:///./network_rag.db` | SQLAlchemy 数据库连接 |
+| `DATABASE_URL` | `sqlite:///./network_rag.db` | SQLAlchemy 数据库连接；相对 SQLite 路径固定解析到 `backend/`，与实际启动目录无关 |
 | `DOCUMENT_UPLOAD_DIR` | `data/uploads` | 上传文件存储目录 |
 | `DOCUMENT_MAX_UPLOAD_BYTES` | `52428800` | 单文件上限，默认 50 MB |
 | `QDRANT_URL` | `http://127.0.0.1:6333` | Qdrant 服务地址 |
@@ -140,14 +148,84 @@ docker compose exec backend python -m app.cli.create_admin
 | `OPENAI_TEMPERATURE` | `0` | 采样温度，0 表示可复现输出 |
 | `OPENAI_MAX_TOKENS` | `1024` | 单次回答长度上限 |
 | `INDEXING_LEASE_SECONDS` | `900` | 索引租约，超时后文档可被重新索引 |
+| `EMBEDDING_CACHE_DIR` | `.runtime/cache` | 编码器编译缓存位置，指向项目内目录以避免依赖系统临时目录 |
+| `EMBEDDING_OFFLINE` | `true` | 只读本地 Hugging Face 缓存、不联网校验；缓存不完整时需设为 `false` |
 | `LOGIN_MAX_ATTEMPTS` / `LOGIN_WINDOW_SECONDS` | `5` / `300` | 登录限流（按客户端+用户名） |
 | `CHAT_MAX_REQUESTS` / `CHAT_WINDOW_SECONDS` | `30` / `60` | 聊天接口限流（按用户） |
-| `FRONTEND_ORIGIN` | `http://127.0.0.1:5173` | CORS 允许的前端来源 |
+| `FRONTEND_ORIGIN` | `http://127.0.0.1:5173` | CORS 允许的前端来源；为回环地址时自动接受 `localhost`、`127.0.0.1`、`[::1]` 三种写法 |
 | `JWT_SECRET_KEY` | 仅开发默认值 | JWT 签名密钥，生产环境必须替换 |
 | `AUTH_COOKIE_SECURE` | `false` | HTTPS 部署时必须设为 `true` |
 
 限流是**进程内**实现（线程安全的滑动窗口），单进程部署足够；多 worker 或水平扩容
 时必须换成共享存储（Redis）或在前置网关上做限流。
+
+### 前端报 “Failed to fetch” 时怎么查
+
+浏览器的 `fetch` 把两类完全不同的问题都报成同一句话：请求根本没发出去（后端没启动、
+端口不对），以及**响应回来了但被 CORS 拦下**。第二种最容易被误判，因为 DevTools 的
+Network 面板仍然会显示真实状态码，而 JS 只拿到 `TypeError: Failed to fetch`，
+后端返回的 `message` 永远读不到。
+
+判定顺序：
+
+1. Network 面板里看那条请求。显示 `(failed)` 且没有状态码，说明连接层失败，先确认
+   后端在监听：浏览器打开 `http://127.0.0.1:8000/health`。
+2. 有状态码但控制台报 CORS，说明是**来源不匹配**。本站只允许 `FRONTEND_ORIGIN`
+   配置的来源（回环地址自动接受三种写法），所以用 `localhost:5173` 打开前端、而配置
+   写的是 `127.0.0.1:5173` 时会被拒绝；反过来也一样。
+3. 想看后端到底抛了什么，运行诊断脚本，它在进程内驱动一次真实的流式提问并打印完整
+   回溯（会临时建一个用户和会话，结束后删除）：
+
+   ```powershell
+   .venv\Scripts\python.exe diagnose_chat_500.py
+   ```
+
+未捕获异常由 `ServerErrorMiddleware` 在最外层生成 500，它不经过 `CORSMiddleware`，
+所以后端显式在 `app/core/exceptions.py` 里补上了 CORS 头；否则任何 500 在跨域场景下
+都会被浏览器吞掉，只留下 `Failed to fetch`。
+
+### 启动环境：别在受限/沙箱终端里启动后端
+
+**症状**：`/health` 与所有读接口都正常，但**任何写操作都失败** —— 新建会话返回 500、
+聊天结束时报 `Conversation could not be saved`，日志里是
+`sqlite3.OperationalError: attempt to write a readonly database`。
+
+**原因**：后端进程被拉起它的受限环境（编辑器、agent 工具或沙箱终端）拦截了文件写入。
+此时那个数据库文件对同期从普通终端启动的进程**完全可写**（`pragma integrity_check`
+返回 `ok`、`INSERT` 正常），因此**既不是文件权限问题，也不是应用缺陷** —— 换一个启动
+上下文，同一份代码、同一个数据库文件就一切正常。
+
+**处理**：在**独立的**普通终端里启动。开始菜单打开 PowerShell，不要用编辑器或 agent
+工具的内置终端；从那些界面里双击 `.bat` 同样会继承受限环境。
+
+```powershell
+cd 'F:\AI CODE\lnternet'
+.\start-dev.bat
+```
+
+判断是否正常：进程树里不应出现线程数达数十、占用数百 MB 内存的
+`python.exe -c "from multiprocessing.spawn import spawn_main; ..."` 子进程 ——
+它在受限环境下会被注入。
+
+**在 Windows 上还有一个更隐蔽的成因：完整性级别。** 从沙箱/受限环境启动的进程运行在
+**低完整性**级别，而 Windows 的 No-Write-Up 规则禁止低完整性进程写入中等完整性的
+对象 —— 这与文件权限无关，`icacls` 里看起来一切正常也无济于事。判断方法：
+
+```powershell
+icacls 'F:\AI CODE\lnternet\backend' | Select-String 'Mandatory Label'
+```
+
+没有输出即为默认的中等完整性。受限进程若要写这个目录（SQLite 每次写入都必须在 `.db`
+旁边**创建 `-journal` 文件**），就在**管理员** PowerShell 里给它打上与项目其它可写目录
+一致的标签：
+
+```powershell
+icacls 'F:\AI CODE\lnternet\backend' '/setintegritylevel' '(OI)(CI)Low'
+```
+
+标记为 Low 不会放宽安全性：它只允许低完整性进程写入该目录，普通用户进程照常读写。
+项目里的 `.runtime/` 本来就有这个标签 —— 这也正好解释了为什么模型缓存、临时目录与
+诊断脚本一直正常，唯独数据库写入失败。
 
 ## 质量检查
 
@@ -184,6 +262,19 @@ alembic upgrade head
 拦住"模型已改、迁移没跟上"的漂移；同时校验 SQLite 外键约束与级联删除是否真正
 生效。
 
+如果后端曾临时指向过另一份数据库副本（例如 `DATABASE_URL` 被环境变量覆盖成
+`.runtime/network_rag.db`），副本里会多出原库没有的数据。`finish_setup.py` 用来
+把这种副本合并回项目库，并确保 `.env` 里有 `RETRIEVAL_MIN_SCORE`：
+
+```powershell
+.venv\Scripts\python.exe finish_setup.py
+```
+
+它会先把两份库分别备份到 `.runtime/backup-project-<时间>.db` 与
+`.runtime/backup-runtime-<时间>.db`，再按主键补齐副本里多出的 `messages` 行、
+刷新有差异的 `users` 行，最后打印逐表计数校验。命令是幂等的，可以重复执行；
+`--skip-env` 不修改 `.env`，`--delete-runtime-copy` 在合并后删除副本。
+
 FTS5 在写入行时就完成分词，因此**改变分词方式的迁移不会自动重新分词已有内容**。
 迁移后如检索结果异常，可重建关键词索引（只重新分词，不重新解析文档、不调用
 Embedding 与 LLM，因此没有额外 API 成本）：
@@ -197,6 +288,79 @@ python -m app.cli.rebuild_search_index
 中文当作单个词元，导致中文查询命中率为 0，因此索引期与查询期统一通过
 `app/services/tokenization.py` 切词，并剔除停用词与纯标点。
 
+**融合结果限制同一文档最多占 2 个席位。** RRF 按**名次**计分，因此一个文档只要在
+向量排名里占据相邻的若干名次，就能把 8 个提示词席位中的大部分据为己有。实测（内置
+语料、提问 `OSPF 邻居关系是怎么建立的？`）：中文《STP与RSTP与MSTP_自编笔记.md》占据
+S1、S4–S8 共 6 席，而真正含答案的 `RFC2328_OSPFv2.txt` 排在第 33 位——当时
+`VECTOR_SEARCH_LIMIT = 30`，它**在按分数过滤之前就被 Qdrant 截断了**，从未进入候选集。
+
+因此 `app/services/search.py` 同时做两件事，二者缺一不可：
+
+- `VECTOR_SEARCH_LIMIT` 由 30 提高到 **200**。单提高上限**不会**改变结果（实测在
+  30/100/200/300 四个取值下 Top8 完全相同），因为融合顺序由名次决定、与池子大小无关；
+  它只是让排在第 33 位的正确文档有机会进入候选集。
+- `MAX_CHUNKS_PER_DOCUMENT = 2` 限制单一文档在提示词中的席位。仅加上限同样不够——
+  排第 33 位的文档在 limit=30 时依然进不来。
+
+两者合起来才把正确文档送进提示词：上述提问下 `RFC2328_OSPFv2.txt` 现在占 S7–S8
+（`scripts/probe_retrieval_rank.py` 显示它从 `OUTSIDE LIMIT` 变为 `in candidates`），
+`BGP 路由反射器的作用是什么？` 则在 Top8 中出现 `RFC4456_BGP路由反射.md` 与
+`RFC4271_BGP-4.md`，Top8 覆盖的文档数从 2 提升到 5。
+
+注意这**只修正席位分配，不改变排序质量**：排序仍由 embedding 模型决定，而
+`multilingual-e5-small` 会把不相关的中文笔记排在正确的英文 RFC 之前（差距约
+0.02——实测 0.8554 对 0.8332）。要真正提高排序质量需要更换模型（见 `docs/knowledge-base.md`）。
+
+排查检索问题时，这两个脚本不需要启动服务即可运行（均在项目根目录执行）：
+
+```powershell
+# 每个文档在向量排名中的首次出现位置，标注是被上限截掉还是被阈值滤掉
+.venv\Scripts\python.exe scripts\probe_retrieval_rank.py "你的问题"
+
+# 完整走一次真实提问，打印流式答案与引用来源
+.venv\Scripts\python.exe scripts\ask.py "你的问题"
+```
+
+**可用临时目录由应用自己保证。** 若系统临时目录不可写（受限/沙箱环境常见：你自己的
+shell 能写 `%TEMP%`，但被 harness 拉起的服务进程不能），Python 的 `tempfile` 会逐个
+探测候选目录并最终抛 `FileNotFoundError: No usable temporary directory found`。而
+`torch._dynamo` 与 `huggingface_hub` 都在**导入期**解析临时路径，于是加载编码器时整个
+请求失败——表现为首个提问返回 503，日志里是那串候选目录列表。
+
+`app/core/tempdir.py` 的 `ensure_usable_temp_directory()` 在应用启动时
+（`create_app()`）以及导入编码器之前各执行一次：它能写系统临时目录就原样保留；不能写
+就改用 `.runtime/tmp`，并同时设置 `tempfile.tempdir` 与 `TEMP`/`TMP`。
+
+必须直接赋值 `tempfile.tempdir` 而不是只设环境变量：`tempfile` 会记住先前探测失败的
+结果，显式赋值才能跳过它的搜索。实测在"所有候选都不可写"的条件下，此前会抛
+`FileNotFoundError` 的 `torch._inductor` 缓存路径能正常解析，且完整提问返回 200。
+
+若机器无法直连 Hugging Face，先单独把模型取到本地缓存再启动后端（这一步失败时会把
+真实原因直接打出来，不必等到提问才在 500 里猜）：
+
+```powershell
+cd backend
+..\.venv\Scripts\python.exe -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-small'); print('model cached')"
+```
+
+模型取不到时，聊天接口会返回 **503** 与 `Embedding model is unavailable`（而不是裸
+500），服务端日志中保留完整根因。使用镜像站时通过 Hugging Face 自身的
+`HF_ENDPOINT` 环境变量指定，例如 `HF_ENDPOINT=https://hf-mirror.com`。
+
+**模型已缓存后应用会自动进入离线模式。** 模型落在 Hugging Face 缓存里（默认
+`%USERPROFILE%\.cache\huggingface\hub\models--intfloat--multilingual-e5-small`，约
+493 MB）。只要缓存存在，`EMBEDDING_OFFLINE=true`（默认值）就让进程完全不去查
+`huggingface.co`：`huggingface_hub` 的 `HF_HUB_OFFLINE` 是在其 **import 时**读入
+模块级常量的（`huggingface_hub/constants.py`），因此**事后在 shell 里 export 是无效的**
+——只要 `huggingface_hub` 已被任何模块导入过就来不及了。所以应用在导入编码器之前
+（`ensure_embedding_caches()`）自己设置这两个变量，不需要你配任何东西。
+
+联网被墙时若不设这一项，每个文件都会 HEAD 请求并重试 5 次，日志刷满
+`WinError 10054`，**每次首次提问要白等约 1 分钟**。实测开启后纯本地加载约 18 秒、
+零重试日志。缓存不完整时会被明确报错（503 `Embedding model is unavailable`），
+而不是静默降级；此时把 `EMBEDDING_OFFLINE=false` 并保证能访问 Hub（或设
+`HF_ENDPOINT=https://hf-mirror.com`）即可补齐缓存。
+
 索引本身是 FTS5 的 **external-content 表**：切块正文与元数据存放在普通表
 `document_chunk_rows`（`document_id` 上有索引），虚拟表只保存词元流，两者由触发器
 保持同步。因此按文档清理切块走索引查找，不再是虚拟表全表扫描；删除文档时外键级联
@@ -204,10 +368,16 @@ python -m app.cli.rebuild_search_index
 
 ## 运维要点
 
-**切块尺寸变更后需要重新索引。** 当前默认目标是 320 cl100k token、重叠 48、硬上限
-400（历史版本是 500/80）。已索引文档的切块不会自动重切，`rebuild_search_index`
-也只重新分词、不重新解析，所以要让旧文档用上新尺寸，需要在管理界面对它们重新执行
-索引（解析 → 切块 → Embedding → 写入两个存储）。
+**切块尺寸用 Embedding 自己的分词器计量。** 当前默认目标是 320 embedding token、
+重叠 48、硬上限 450（历史版本是 500/80，后来是 320 cl100k token / 上限 400）。
+`intfloat/multilingual-e5-small` 的分词器对 ASCII 密集内容（RFC 里的 `+-+-+-+-+`
+rule 图、表格、参考文献列表）会数出远超 cl100k 的 token 数：实测有切块 cl100k 只有
+290，编码器却需要 901 个，于是索引直接以 `EmbeddingInputTooLongError` 失败——因为
+编码器在 512 token 处截断，超过的尾巴会被静默丢弃。`app/services/token_counter.py`
+的 `embedding` 后端负责按真实编码器计量，`EMBEDDING_PASSAGE_OVERHEAD` 与
+`passage: ` 前缀各计一次（不是逐词计），已索引文档的切块不会自动重切，
+`rebuild_search_index` 也只重新分词、不重新解析，所以要让旧文档用上新尺寸，需要在
+管理界面对它们重新执行索引（解析 → 切块 → Embedding → 写入两个存储）。
 
 **大文件建议用后台索引接口。** `POST /api/admin/documents/{id}/index/async` 先
 claim 任务并立即返回 `202` 与 `job_id`，解析、切块、Embedding、写两个存储都在响应
