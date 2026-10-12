@@ -52,7 +52,13 @@ Thumbs.db
 # pre-commit cache when redirected into the workspace
 .pre-commit-cache/
 
-# Torch/encoder build caches and the temporary directory used when the system
-# one is not writable, kept project-local so the encoder never depends on it
-.runtime/cache/
-.runtime/tmp/
+# Runtime scratch: encoder build caches, the fallback temporary directory, the
+# uploads staged for indexing, logs, the pip HTTP cache and the one-off
+# diagnostic scripts written while debugging. All of it is regenerated and the
+# directory runs into hundreds of megabytes, so it is ignored as a whole instead
+# of path by path; project-local placement is what keeps the encoder off the
+# system temporary directory.
+.runtime/
+
+# Sandbox/agent ACL audit reports, written by the harness rather than the project
+.dsh-acl-reports/
