@@ -1,12 +1,17 @@
 """Process-cached CPU embedding generation with multilingual E5."""
 
 import logging
+import os
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
+from pathlib import Path
 from typing import Protocol, cast
 
 import numpy as np
 from numpy.typing import NDArray
+
+from app.core.config import REPOSITORY_ROOT, get_settings
+from app.core.tempdir import DEFAULT_TEMP_DIRECTORY, ensure_usable_temp_directory
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +25,17 @@ DEFAULT_BATCH_SIZE = 32
 # tokenizer without any error. The limit is therefore pinned explicitly here and
 # passages that would exceed it are rejected instead of silently truncated.
 MAX_SEQUENCE_LENGTH = 512
+# Torch derives these two cache locations from ``tempfile.gettempdir()``, which
+# raises when no candidate temporary directory is writable -- and it does so at
+# *import* time, inside ``torch._dynamo``. That turned a missing cache into an
+# unhandled 500 on the first question instead of a clear error. Both variables
+# take precedence over the temporary directory, and are only defaulted so an
+# operator can still point them somewhere else.
+CACHE_ENVIRONMENT_VARIABLES = ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR")
+DEFAULT_CACHE_DIRECTORY = Path(".runtime") / "cache"
+# Read once, at huggingface_hub import time (see its constants module), so they
+# have to be in place before the encoder is imported.
+OFFLINE_ENVIRONMENT_VARIABLES = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
 
 
 class SentenceEncoder(Protocol):
@@ -40,9 +56,50 @@ class SentenceEncoder(Protocol):
         ...
 
 
+def embedding_cache_directory() -> Path:
+    """Return the cache directory the encoder's runtime should write to.
+
+    An explicit ``EMBEDDING_CACHE_DIR`` wins; otherwise the repository's own
+    ``.runtime/cache`` is used, so the cache never depends on the system
+    temporary directory being writable.
+    """
+    configured = os.environ.get("EMBEDDING_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return REPOSITORY_ROOT / DEFAULT_CACHE_DIRECTORY
+
+
+def ensure_embedding_caches() -> Path:
+    """Prepare the encoder runtime and return its cache directory.
+
+    Must run *before* ``sentence_transformers`` is imported, because importing it
+    pulls in ``torch._dynamo``, which resolves its cache directory at import
+    time, and ``huggingface_hub``, which reads ``HF_HUB_OFFLINE`` once at import
+    time into a module-level constant. Setting either variable any later has no
+    effect. Variables already set by the operator are left untouched.
+    """
+    directory = embedding_cache_directory()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # An unwritable cache is not fatal by itself: torch creates it later and
+        # reports its own error, which must not be replaced by one from here.
+        logger.warning("Embedding cache directory %s could not be created", directory)
+    # Nothing below may import torch or huggingface_hub before a usable temporary
+    # directory exists, so this runs as early as possible in the request path.
+    ensure_usable_temp_directory(REPOSITORY_ROOT / DEFAULT_TEMP_DIRECTORY)
+    for variable in CACHE_ENVIRONMENT_VARIABLES:
+        os.environ.setdefault(variable, str(directory))
+    if get_settings().embedding_offline:
+        for variable in OFFLINE_ENVIRONMENT_VARIABLES:
+            os.environ.setdefault(variable, "1")
+    return directory
+
+
 @lru_cache(maxsize=1)
 def _get_default_model() -> SentenceEncoder:
     """Load the fixed CPU model once for the current application process."""
+    ensure_embedding_caches()
     from sentence_transformers import SentenceTransformer
 
     return cast(
@@ -53,6 +110,16 @@ def _get_default_model() -> SentenceEncoder:
 
 class EmbeddingDimensionError(RuntimeError):
     """Raised when the configured model returns an unexpected vector size."""
+
+
+class EmbeddingServiceUnavailableError(RuntimeError):
+    """Raised when the encoder stack cannot be loaded at all.
+
+    Distinct from a wrong result: the model was never obtained, which is an
+    operational problem (no network on the first run, an unwritable cache, a
+    broken install) rather than a bad request. Callers turn it into a 503 so the
+    client sees an actionable message instead of an opaque 500.
+    """
 
 
 class EmbeddingInputTooLongError(RuntimeError):

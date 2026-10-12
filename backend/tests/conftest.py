@@ -95,7 +95,11 @@ async def client(
     # land in the same isolated database instead of the module-level factory.
     app.dependency_overrides[get_session_factory] = lambda: session_factory
     # Rate limiters keep process-wide state, so every test gets fresh instances;
-    # tests that exercise limiting override these with a tighter limiter.
+    # tests that exercise limiting override these with a tighter limiter. The
+    # cached factories are cleared here too: a limiter cached by an earlier test
+    # would otherwise outlive its own override and decide this test's limits.
+    get_login_rate_limiter.cache_clear()
+    get_chat_rate_limiter.cache_clear()
     settings = get_settings()
     login_limiter = FixedWindowRateLimiter(
         settings.login_max_attempts,

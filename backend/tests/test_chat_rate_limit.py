@@ -79,3 +79,49 @@ async def test_chat_stream_rejects_requests_over_the_user_limit(
         "message": CHAT_RATE_LIMIT_MESSAGE,
     }
     assert int(second.headers["retry-after"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_uses_the_injected_encoder(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The route must use the encoder FastAPI injected, not the global one.
+
+    A route that re-fetches the dependency by calling the factory itself ignores
+    ``app.dependency_overrides`` and loads the real model, which turns every test
+    that substitutes the encoder into an accidental integration test.
+    """
+    with session_factory() as session:
+        user = UserRepository(session).create(
+            username="chat-encoder",
+            password_hash="hashed-password",
+        )
+        conversation = ConversationRepository(session).create(user_id=user.id)
+        user_id = user.id
+        conversation_id = conversation.id
+    client.cookies.set(
+        get_settings().auth_cookie_name,
+        create_access_token(user_id),
+    )
+
+    class RecordingEmbedding(FakeQueryEmbedding):
+        """Record whether the route actually asked this instance to embed."""
+
+        calls = 0
+
+        def embed_query(self, text: str) -> list[list[float]]:
+            """Count the call and return a deterministic vector."""
+            RecordingEmbedding.calls += 1
+            return super().embed_query(text)
+
+    app.dependency_overrides[get_embedding_service] = RecordingEmbedding
+    app.dependency_overrides[get_qdrant_repository] = EmptyVectorRepository
+
+    response = await client.post(
+        "/api/chat/stream",
+        json={"conversation_id": conversation_id, "message": "What is OSPF?"},
+    )
+
+    assert response.status_code == 200
+    assert RecordingEmbedding.calls == 1

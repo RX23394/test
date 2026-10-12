@@ -16,7 +16,12 @@ from app.core.rate_limit import (
     get_chat_rate_limiter,
 )
 from app.db.session import SessionFactoryDependency
-from app.rag.dependencies import EmbeddingDependency, LLMDependency, QdrantDependency
+from app.rag.dependencies import (
+    EmbeddingDependency,
+    EmbeddingReadyDependency,
+    LLMDependency,
+    QdrantDependency,
+)
 from app.repositories.conversation import ConversationRepository
 from app.repositories.document import DocumentRepository
 from app.repositories.fts import FtsChunkRepository
@@ -227,14 +232,18 @@ def create_streaming_response(events: Iterator[str]) -> StreamingResponse:
 def stream_chat(
     payload: ChatRequest,
     current_user: CurrentUser,
+    chat_limiter: ChatRateLimiterDependency,
     session: SessionDependency,
     embedding_service: EmbeddingDependency,
+    # Resolved after the rate limiter, so a flood is still answered with 429
+    # instead of paying for an encoder load first.
+    embedding_ready: EmbeddingReadyDependency,
     qdrant_repository: QdrantDependency,
     llm_provider: LLMDependency,
     session_factory: SessionFactoryDependency,
-    chat_limiter: ChatRateLimiterDependency,
 ) -> StreamingResponse:
     """Retrieve Top8 sources and stream a citation-grounded answer."""
+    del embedding_ready
     rate_limit_key = f"user:{current_user.id}"
     if not chat_limiter.allow(rate_limit_key):
         raise HTTPException(
