@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import DEFAULT_JWT_SECRET_KEY, Settings
+from app.core.config import BACKEND_ROOT, DEFAULT_JWT_SECRET_KEY, Settings
 
 
 def test_development_allows_local_authentication_defaults() -> None:
@@ -95,3 +95,82 @@ def test_production_accepts_hardened_authentication_settings() -> None:
     )
 
     assert settings.app_env == "production"
+
+
+def test_cors_origins_include_every_loopback_spelling() -> None:
+    """Both loopback names of the dev frontend are accepted as origins.
+
+    The browser treats ``localhost`` and ``127.0.0.1`` as distinct origins, so a
+    single-entry allow-list rejects the frontend whenever it is opened under the
+    other spelling -- which surfaces as "Failed to fetch" rather than a readable
+    error. The configured origin stays first so it remains the primary value.
+    """
+    settings = Settings(
+        _env_file=None,
+        frontend_origin="http://127.0.0.1:5173",
+    )
+
+    assert settings.cors_allow_origins == [
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://[::1]:5173",
+    ]
+
+
+def test_cors_origins_keep_a_non_loopback_origin_alone() -> None:
+    """A real host is trusted exactly as configured, with no aliases added."""
+    settings = Settings(
+        _env_file=None,
+        frontend_origin="https://rag.example.com",
+    )
+
+    assert settings.cors_allow_origins == ["https://rag.example.com"]
+
+
+def test_cors_origins_accept_the_ipv6_loopback_spelling() -> None:
+    """A configured IPv6 loopback origin resolves to its equivalents."""
+    settings = Settings(
+        _env_file=None,
+        frontend_origin="http://[::1]:5173",
+    )
+
+    assert settings.cors_allow_origins == [
+        "http://[::1]:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ]
+
+
+def test_relative_sqlite_path_is_anchored_to_the_backend_directory() -> None:
+    """The local database does not depend on the working directory.
+
+    Left relative, ``sqlite:///./network_rag.db`` resolves against the process
+    working directory, so starting the server from the repository root instead
+    of ``backend/`` silently opens a different, empty database and every query
+    fails with "no such table".
+    """
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite:///./network_rag.db",
+    )
+
+    assert settings.database_url == (
+        f"sqlite:///{(BACKEND_ROOT / 'network_rag.db').as_posix()}"
+    )
+
+
+def test_absolute_sqlite_path_is_left_untouched() -> None:
+    """A container path must not be rewritten to a host path."""
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite:////app/data/network_rag.db",
+    )
+
+    assert settings.database_url == "sqlite:////app/data/network_rag.db"
+
+
+def test_in_memory_sqlite_url_is_left_untouched() -> None:
+    """An in-memory database has no path to anchor."""
+    settings = Settings(_env_file=None, database_url="sqlite://")
+
+    assert settings.database_url == "sqlite://"

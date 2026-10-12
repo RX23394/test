@@ -25,6 +25,10 @@ jiebacache
 data/uploads/*
 !data/uploads/.gitkeep
 
+# Prepared knowledge-base corpus, staged here until it is uploaded
+data-staging/
+corpus-runtime/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
@@ -47,3 +51,8 @@ Thumbs.db
 
 # pre-commit cache when redirected into the workspace
 .pre-commit-cache/
+
+# Torch/encoder build caches and the temporary directory used when the system
+# one is not writable, kept project-local so the encoder never depends on it
+.runtime/cache/
+.runtime/tmp/
